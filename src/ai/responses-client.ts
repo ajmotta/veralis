@@ -155,6 +155,13 @@ export async function analyzeCase(
       return deterministicFallback(caseState, "INVALID_STRUCTURED_OUTPUT", safeProviderMetadata(envelope));
     }
 
+    structured.calculations = {
+      items: caseState.calculations.map((calculation) => ({
+        ...calculation,
+        inputRefs: [...calculation.inputRefs],
+      })),
+    };
+
     const verification = verifyStructuredResponse(structured, caseState);
     if (!verification.ok) {
       return deterministicFallback(

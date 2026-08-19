@@ -259,7 +259,7 @@ test("Responses API failure keeps deterministic analysis available", async () =>
   assert.doesNotMatch(JSON.stringify(result), /upstream detail|test-key/);
 });
 
-test("unverified model output cannot overwrite deterministic calculations", async () => {
+test("server replaces model calculations with deterministic calculations before verification", async () => {
   const state = makeCase();
   const structured = synthesizeDeterministicResponse(state);
   structured.calculations.items[0].rawResult = 999;
@@ -272,9 +272,29 @@ test("unverified model output cannot overwrite deterministic calculations", asyn
       output_text: JSON.stringify(structured),
     }),
   });
-  assert.equal(result.mode, "DETERMINISTIC_FALLBACK");
-  assert.equal(result.fallbackReason, "VERIFICATION_FAILED");
+  assert.equal(result.mode, "OPENAI");
   assert.equal(result.response.calculations.items[0].rawResult, -5);
+});
+
+test("analyze route temporarily accepts any phrase before model-level scope handling", async () => {
+  const state = makeCase({
+    objective: { currentQuestion: "É isso mesmo?", decisionUnderAnalysis: "continuação" },
+    sources: {
+      files: ["demo.csv"],
+      conflicts: [],
+      userStatements: [{ id: "stmt-1", text: "Por que a margem caiu?", turn: 1 }],
+    },
+  });
+  const response = await POST(new Request("http://localhost/api/analyze", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "oai-authenticated-user-id": "test-user-unrestricted-phrase",
+      "oai-authenticated-user-email": "test@example.invalid",
+    },
+    body: JSON.stringify({ caseState: state }),
+  }));
+  assert.equal(response.status, 200);
 });
 
 test("analyze route stays functional without an API credential", async () => {

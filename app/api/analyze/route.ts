@@ -5,6 +5,7 @@ import type { CaseState } from "../../../src/domain/schemas/case-state";
 const MAX_BODY_BYTES = 64_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_REQUESTS = 5;
+const ENFORCE_CFO_SCOPE = process.env.ENFORCE_CFO_SCOPE === "true";
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
 
 function isCaseState(value: unknown): value is CaseState {
@@ -100,7 +101,7 @@ export async function POST(request: Request): Promise<Response> {
   const previousQuestions = caseState.sources.userStatements
     .map((statement) => statement.text)
     .filter((text) => text !== caseState.objective.currentQuestion);
-  if (!isCfoConversationInScope(caseState.objective.currentQuestion, previousQuestions)) {
+  if (ENFORCE_CFO_SCOPE && !isCfoConversationInScope(caseState.objective.currentQuestion, previousQuestions)) {
     return json({
       error: "OUT_OF_SCOPE",
       message: "Seja específico sobre finanças, operação, turmas, equipe ou crescimento da escola. Posso aprofundar respostas anteriores dentro desse contexto.",

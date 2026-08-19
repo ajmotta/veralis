@@ -138,7 +138,8 @@ export function verifyStructuredResponse(
   }
   const directAnswerIsMeta = response.directAnswer.startsWith("Ainda não há evidência suficiente")
     || response.directAnswer.startsWith("Há um conflito de fontes")
-    || response.directAnswer.startsWith("Não consegui concluir a análise agora");
+    || response.directAnswer.startsWith("Não consegui concluir a análise agora")
+    || response.directAnswer === "Posso responder apenas sobre finanças, operação, turmas, equipe e crescimento da escola.";
   const directAnswerSupport = response.evidence.items.find(
     (claim) => claim.statement === response.directAnswer && claim.evidenceRefs.length > 0,
   );

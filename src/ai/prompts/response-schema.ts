@@ -20,7 +20,7 @@ const calculationSchema = {
   properties: {
     id: { type: "string" },
     formulaId: { type: "string" },
-    formulaVersion: { const: "1.0.0" },
+    formulaVersion: { type: "string", const: "1.0.0" },
     period: { type: "string" },
     inputRefs: stringArray,
     rawResult: { type: "number" },

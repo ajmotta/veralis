@@ -238,6 +238,11 @@ test("Responses API request uses configured model and strict structured output",
       strict: true,
     },
   );
+  const responseSchema = (capturedBody.text as { format: { schema: { properties: { calculations: { properties: { items: { items: { properties: { formulaVersion: { type: string; const: string } } } } } } } } } }).format.schema;
+  assert.deepEqual(responseSchema.properties.calculations.properties.items.items.properties.formulaVersion, {
+    type: "string",
+    const: "1.0.0",
+  });
   assert.equal(result.mode, "OPENAI");
   assert.equal(result.provider?.responseId, "resp_test_safe_metadata");
   assert.equal(result.verification.ok, true);

@@ -13,6 +13,12 @@ const METRIC_QUESTIONS: Record<string, string> = {
   effective_loss_rate: "Qual valor vencido foi definitivamente baixado como perda?",
   occupancy: "Qual é a capacidade de alunos da turma analisada?",
   payroll_over_revenue: "Qual é o custo total da folha no período analisado?",
+  principal_cost_line: "Qual é o detalhamento das despesas por categoria no período analisado?",
+  operating_margin: "Qual é a receita líquida e o resultado operacional do período analisado?",
+  net_revenue: "Qual é a receita líquida do período analisado?",
+  discount_rate: "Qual é o valor bruto das mensalidades e o total de descontos e bolsas no período?",
+  cash_balance: "Qual é o saldo de caixa disponível e as obrigações dos próximos 30 dias?",
+  monthly_hire_cost: "Qual é o custo mensal total da contratação considerada?",
   revenue_per_student: "Quantos alunos pagantes havia no período analisado?",
 };
 
@@ -29,6 +35,18 @@ function questionForMetric(metric: MetricValue, query: string): QuestionCandidat
   const metricKey = metric.id.toLocaleLowerCase("pt-BR");
   const synonymMatch = metricKey === "payroll_over_revenue"
     ? /folha|sal[aá]rio|pessoal/u.test(query)
+    : metricKey === "principal_cost_line"
+      ? /principal.*(?:custo|despesa)|linha.*(?:custo|despesa)|maior.*(?:custo|despesa)|(?:custo|despesa).*principal/u.test(query)
+    : metricKey === "operating_margin"
+      ? /margem|rentabilidade|resultado|lucro|preju[ií]zo|performance|desempenho/u.test(query)
+    : metricKey === "net_revenue"
+      ? /receita|faturamento|mensalidade|ticket/u.test(query)
+    : metricKey === "discount_rate"
+      ? /desconto|bolsa/u.test(query)
+    : metricKey === "cash_balance"
+      ? /caixa|liquidez|capital de giro|saldo banc[aá]rio/u.test(query)
+    : metricKey === "monthly_hire_cost"
+      ? /contrat|admit|demit|equipe/u.test(query)
     : metricKey === "occupancy"
       ? /ocupa|vaga|matr[ií]cula|turma/u.test(query)
       : metricKey === "revenue_per_student"

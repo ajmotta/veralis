@@ -1,10 +1,12 @@
 import type { Calculation, CaseState, Claim, Evidence, PeriodFinancials } from "../domain/schemas/case-state";
+import { classifyCfoQuestion } from "../ai/orchestration/question-intent";
 
 export type UploadedFinancialPeriod = {
   period: string;
   netRevenue: number;
   operatingResult: number;
   payroll?: number;
+  costCategories?: Array<{ name: string; value: number }>;
 };
 
 export type UploadedOperations = {
@@ -181,7 +183,19 @@ function parseMonthlyPdf(lines: string[], name: string, businessName: string): U
     const netRevenue = revenueValues[7];
     const operatingResult = resultValues[10];
     const payroll = Math.abs(revenueValues[8]) + Math.abs(revenueValues[9]) + Math.abs(revenueValues[10]);
-    if (netRevenue !== 0) financialPeriods.push({ period, netRevenue, operatingResult, payroll });
+    const costCategories = [
+      { name: "Folha e encargos", value: payroll },
+      { name: "Aluguel e condomínio", value: Math.abs(resultValues[0]) },
+      { name: "Energia", value: Math.abs(resultValues[1]) },
+      { name: "Água", value: Math.abs(resultValues[2]) },
+      { name: "Alimentação", value: Math.abs(resultValues[3]) },
+      { name: "Material pedagógico", value: Math.abs(resultValues[4]) },
+      { name: "Serviços terceirizados", value: Math.abs(resultValues[5]) },
+      { name: "Marketing", value: Math.abs(resultValues[6]) },
+      { name: "Despesas administrativas", value: Math.abs(resultValues[7]) },
+      { name: "Despesas financeiras", value: Math.abs(resultValues[8]) },
+    ].filter((category) => category.value > 0);
+    if (netRevenue !== 0) financialPeriods.push({ period, netRevenue, operatingResult, payroll, costCategories });
   }
   return financialPeriods.length > 0 ? { name, businessName, financialPeriods, warnings: [] } : null;
 }
@@ -227,7 +241,10 @@ export function buildUploadedCfoCaseState(question: string, previousQuestions: s
     const calculationId = `calc-upload-margin-${suffix}`;
     calculations.push({ id: calculationId, formulaId: "operating_margin", formulaVersion: "1.0.0", period: period.period, inputRefs: [resultEvidence, revenueEvidence], rawResult: margin, displayedResult: percent(margin), unit: "PERCENT", status: "PASS" });
     calculationClaims.push({ id: `claim-upload-margin-${suffix}`, statement: `A margem operacional em ${period.period} foi ${percent(margin)}, com receita líquida de ${money(period.netRevenue)} e resultado operacional de ${money(period.operatingResult)}.`, type: "CALCULATION", evidenceRefs: [calculationId], confidence: 0.95 });
-    if (suffix === "current") metrics.push({ id: "operating_margin", period: period.period, value: margin, status: "AVAILABLE", unit: "PERCENT", evidenceRefs: [calculationId], calculationRef: calculationId });
+    if (suffix === "current") {
+      metrics.push({ id: "operating_margin", period: period.period, value: margin, status: "AVAILABLE", unit: "PERCENT", evidenceRefs: [calculationId], calculationRef: calculationId });
+      metrics.push({ id: "net_revenue", period: period.period, value: period.netRevenue, status: "AVAILABLE", unit: "BRL", evidenceRefs: [revenueEvidence] });
+    }
     if (period.payroll && period.payroll > 0) {
       const payrollEvidence = `ev-upload-payroll-${suffix}`;
       const payrollCalculation = `calc-upload-payroll-${suffix}`;
@@ -235,6 +252,19 @@ export function buildUploadedCfoCaseState(question: string, previousQuestions: s
       calculations.push({ id: payrollCalculation, formulaId: "payroll_over_revenue", formulaVersion: "1.0.0", period: period.period, inputRefs: [payrollEvidence, revenueEvidence], rawResult: period.payroll / period.netRevenue, displayedResult: percent(period.payroll / period.netRevenue), unit: "PERCENT", status: "PASS" });
       calculationClaims.push({ id: `claim-upload-payroll-${suffix}`, statement: `A folha representa ${percent(period.payroll / period.netRevenue)} da receita líquida em ${period.period}.`, type: "CALCULATION", evidenceRefs: [payrollCalculation], confidence: 0.9 });
       if (suffix === "current") metrics.push({ id: "payroll_over_revenue", period: period.period, value: period.payroll / period.netRevenue, status: "AVAILABLE", unit: "PERCENT", evidenceRefs: [payrollCalculation], calculationRef: payrollCalculation });
+    }
+    if (period.costCategories && period.costCategories.length > 0) {
+      const orderedCosts = [...period.costCategories].sort((a, b) => b.value - a.value);
+      const principal = orderedCosts[0];
+      const costEvidenceRefs = orderedCosts.map((category, categoryIndex) => {
+        const evidenceId = `ev-upload-cost-${suffix}-${categoryIndex + 1}`;
+        evidence.push({ id: evidenceId, sourceType: "FILE", sourceFile: documents.find((document) => document.financialPeriods.some((item) => item.period === period.period))?.name, period: period.period, rawValue: category.value, normalizedValue: category.value, unit: "BRL", confidence: 0.9 });
+        return evidenceId;
+      });
+      const principalCostCalculation = `calc-upload-principal-cost-${suffix}`;
+      calculations.push({ id: principalCostCalculation, formulaId: "principal_cost_line", formulaVersion: "1.0.0", period: period.period, inputRefs: costEvidenceRefs, rawResult: principal.value, displayedResult: money(principal.value), unit: "BRL", status: "PASS" });
+      calculationClaims.push({ id: `claim-upload-principal-cost-${suffix}`, statement: `A principal linha de custo em ${period.period} é ${principal.name}, com ${money(principal.value)}.`, type: "CALCULATION", evidenceRefs: [principalCostCalculation], confidence: 0.9 });
+      if (suffix === "current") metrics.push({ id: "principal_cost_line", period: period.period, value: principal.value, status: "AVAILABLE", unit: "BRL", evidenceRefs: [principalCostCalculation], calculationRef: principalCostCalculation });
     }
   });
 
@@ -266,9 +296,33 @@ export function buildUploadedCfoCaseState(question: string, previousQuestions: s
   if (selectedFinancial.length === 0) unknowns.push({ id: "unknown-upload-financial", statement: "Não foi possível normalizar receita líquida e resultado operacional dos arquivos enviados.", type: "UNKNOWN", evidenceRefs: [], confidence: 1 });
   if (!operations) unknowns.push({ id: "unknown-upload-operations", statement: "Não foi possível normalizar matrículas e capacidade das turmas dos arquivos enviados.", type: "UNKNOWN", evidenceRefs: [], confidence: 1 });
   const query = normalizeText(question);
-  if (/folha|salario|pessoal/.test(query) && !metrics.some((metric) => metric.id === "payroll_over_revenue")) {
+  const intent = classifyCfoQuestion(query);
+  if (intent === "PAYROLL" && !metrics.some((metric) => metric.id === "payroll_over_revenue")) {
     metrics.push({ id: "payroll_over_revenue", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "PERCENT", evidenceRefs: [] });
     unknowns.unshift({ id: "unknown-upload-payroll", statement: "A folha total e a receita líquida comparável ainda não foram normalizadas para responder esta pergunta.", type: "UNKNOWN", evidenceRefs: [], confidence: 1 });
+  }
+  if (intent === "COST_STRUCTURE"
+    && !metrics.some((metric) => metric.id === "principal_cost_line")) {
+    metrics.push({ id: "principal_cost_line", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "BRL", evidenceRefs: [] });
+    unknowns.unshift({ id: "unknown-upload-cost-breakdown", statement: "O detalhamento comparável das despesas por categoria ainda não foi normalizado para identificar a principal linha de custo.", type: "UNKNOWN", evidenceRefs: [], confidence: 1 });
+  }
+  if (intent === "OCCUPANCY" && !metrics.some((metric) => metric.id === "occupancy")) {
+    metrics.push({ id: "occupancy", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "PERCENT", evidenceRefs: [] });
+  }
+  if ((intent === "MARGIN" || intent === "PERFORMANCE") && !metrics.some((metric) => metric.id === "operating_margin")) {
+    metrics.push({ id: "operating_margin", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "PERCENT", evidenceRefs: [] });
+  }
+  if (intent === "REVENUE" && !metrics.some((metric) => metric.id === "net_revenue")) {
+    metrics.push({ id: "net_revenue", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "BRL", evidenceRefs: [] });
+  }
+  if (intent === "DISCOUNTS") {
+    metrics.push({ id: "discount_rate", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "PERCENT", evidenceRefs: [] });
+  }
+  if (intent === "CASH") {
+    metrics.push({ id: "cash_balance", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "BRL", evidenceRefs: [] });
+  }
+  if (intent === "HIRING") {
+    metrics.push({ id: "monthly_hire_cost", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "BRL", evidenceRefs: [] });
   }
   const financialPeriods: PeriodFinancials[] = selectedFinancial.map((period) => ({
     period: period.period, grossRevenue: period.netRevenue, discounts: 0, netRevenue: period.netRevenue,

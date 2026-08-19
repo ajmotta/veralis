@@ -40,3 +40,23 @@ test("asks for payroll data instead of repeating occupancy when only classes wer
   assert.equal(caseState.metrics.values.find((metric) => metric.id === "payroll_over_revenue")?.status, "UNKNOWN");
   assert.equal(caseState.quality.reconciliation, "PASS");
 });
+
+test("identifies the principal cost line from a monthly management report", () => {
+  const document = parseUploadedPdfText("Girassol_Relatorio.pdf", [
+    "ESPAÇO GIRASSOL EDUCAÇÃO INFANTIL LTDA", "CNPJ 00.000.000/0001-00",
+    "Receitas e deduções", "jul/2026",
+    "260.922", "0", "21.350", "14.689", "3.733", "39.037", "24.657", "237.000", "107.961", "0", "41.025",
+    "Despesas e resultado", "jul/2026",
+    "28.000", "9.706", "2.414", "9.695", "3.057", "12.245", "6.494", "13.619", "1.624", "235.839", "1.161",
+    "Relatório gerado",
+  ].join("\n"));
+  const caseState = buildUploadedCfoCaseState("qual minha principal linha de custo?", [], [document]);
+  assert.ok(caseState.reasoning.calculations.some((claim) => /principal linha de custo.*folha e encargos/i.test(claim.statement)));
+  assert.equal(caseState.metrics.values.find((metric) => metric.id === "principal_cost_line")?.status, "AVAILABLE");
+});
+
+test("asks for cost detail instead of answering with occupancy when only classes were uploaded", () => {
+  const operations = parseUploadedCsv("Girassol_turmas.csv", "turma;matriculados;capacidade\nInfantil A;14;20\nInfantil B;9;20");
+  const caseState = buildUploadedCfoCaseState("qual minha principal linha de custo?", [], [operations]);
+  assert.equal(caseState.metrics.values.find((metric) => metric.id === "principal_cost_line")?.status, "UNKNOWN");
+});

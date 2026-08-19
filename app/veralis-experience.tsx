@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { buildPublicCfoCaseState } from "../src/demo/public-cfo-case";
+import { buildUploadedCfoCaseState, parseUploadedCsv, parseUploadedPdfText, type UploadedSchoolDocument } from "../src/demo/uploaded-school-case";
 
 type Theme = "dark" | "light";
 type DemoStage = "ready" | "question" | "revised";
@@ -98,10 +99,10 @@ function HomeScreen({ onStart, onNewSchool, theme, onTheme }: { onStart: () => v
             </button>
             <p>Pergunta antes de presumir. Calcula antes de responder.</p>
           </div>
-          <input ref={schoolInputRef} className="visually-hidden" type="file" accept=".csv,.xlsx,.pdf" multiple onChange={selectSchoolFiles} />
+          <input ref={schoolInputRef} className="visually-hidden" type="file" accept=".csv,.pdf" multiple onChange={selectSchoolFiles} />
           <button className="new-school-entry" type="button" onClick={() => schoolInputRef.current?.click()}>
             <span aria-hidden="true">＋</span>
-            <span><small>NOVA ESCOLA</small><strong>Subir arquivos para avaliar</strong><em>Selecione CSV, XLSX ou PDF · validação antes do envio</em></span>
+            <span><small>NOVA ESCOLA</small><strong>Subir arquivos para avaliar</strong><em>Selecione CSV ou PDF · até 12 arquivos</em></span>
             <b aria-hidden="true">↗</b>
           </button>
         </div>
@@ -294,6 +295,21 @@ function FollowUpExchange({ turn }: { turn: FollowUpTurn }) {
   );
 }
 
+function UploadedDiagnosis({ analysis }: { analysis: CfoAnalysis }) {
+  return (
+    <article className="assistant-message assistant-message--follow-up" aria-label="Análise dos arquivos enviados">
+      <div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>arquivos da sua escola</span></div></div>
+      <div className="message-content">
+        <AnalysisOrigin analysis={analysis} />
+        <p className="answer-lede">{analysis.response.directAnswer}</p>
+        {analysis.response.diagnosis.secondaryDrivers.length > 0 ? <p className="answer-copy">{analysis.response.diagnosis.secondaryDrivers.slice(0, 3).join(" ")}</p> : null}
+        {analysis.response.recommendation.immediate?.action ? <div className="follow-up-action"><span>Próxima ação</span><p>{analysis.response.recommendation.immediate.action}</p></div> : null}
+        {analysis.response.nextQuestion ? <div className="next-question"><span>Informação necessária</span><p>{analysis.response.nextQuestion}</p></div> : null}
+      </div>
+    </article>
+  );
+}
+
 const navigationItems: Array<{ view: WorkspaceView; label: string; icon: string }> = [
   { view: "overview", label: "Visão geral", icon: "⌂" },
   { view: "chat", label: "Conversa", icon: "◫" },
@@ -467,13 +483,14 @@ type LocalFileState = {
   columns?: number;
   pages?: number;
   characters?: number;
+  document?: UploadedSchoolDocument;
 };
 
 function localFileId(file: File): string {
   return `${file.name}:${file.size}:${file.lastModified}`;
 }
 
-async function inspectPdf(file: File): Promise<Pick<LocalFileState, "status" | "message" | "pages" | "characters">> {
+async function inspectPdf(file: File): Promise<Pick<LocalFileState, "status" | "message" | "pages" | "characters" | "document">> {
   try {
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
     pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -486,12 +503,17 @@ async function inspectPdf(file: File): Promise<Pick<LocalFileState, "status" | "
       return { status: "blocked", message: "PDF acima do limite de 80 páginas desta demonstração." };
     }
     let characters = 0;
+    const pageTexts: string[] = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
-      characters += content.items.reduce((total, item) => {
-        return total + ("str" in item ? item.str.length : 0);
-      }, 0);
+      let pageText = "";
+      for (const item of content.items) {
+        if (!("str" in item)) continue;
+        pageText += `${item.str}${"hasEOL" in item && item.hasEOL ? "\n" : " "}`;
+      }
+      characters += pageText.length;
+      pageTexts.push(pageText);
       page.cleanup();
     }
     const pages = document.numPages;
@@ -501,9 +523,10 @@ async function inspectPdf(file: File): Promise<Pick<LocalFileState, "status" | "
     }
     return {
       status: "ready",
-      message: "PDF lido localmente. O conteúdo permanece somente nesta sessão.",
+      message: "PDF lido e normalizado localmente para o CFO desta sessão.",
       pages,
       characters,
+      document: parseUploadedPdfText(file.name, pageTexts.join("\n")),
     };
   } catch {
     return { status: "blocked", message: "Não foi possível ler este PDF. Verifique se o arquivo está íntegro e sem senha." };
@@ -516,18 +539,19 @@ async function inspectLocalFile(file: File): Promise<LocalFileState> {
   const kind = extension === "csv" ? "CSV" : extension === "pdf" ? "PDF" : extension === "xlsx" ? "XLSX" : "FILE";
   if (file.size > 5 * 1024 * 1024) return { id, name: file.name, kind, status: "blocked", message: "Arquivo bloqueado: limite local de 5 MB." };
   if (extension === "pdf") return { id, name: file.name, kind, ...(await inspectPdf(file)) };
-  if (extension === "xlsx") return { id, name: file.name, kind, status: "blocked", message: "XLSX recebido, mas a leitura ainda não está ativa nesta demonstração." };
-  if (extension !== "csv") return { id, name: file.name, kind, status: "blocked", message: "Formato incompatível. Use CSV, XLSX ou PDF." };
+  if (extension === "xlsx") return { id, name: file.name, kind, status: "blocked", message: "Converta o XLSX para CSV ou envie o PDF correspondente nesta versão." };
+  if (extension !== "csv") return { id, name: file.name, kind, status: "blocked", message: "Formato incompatível. Use CSV ou PDF." };
   const text = await file.text();
   const lines = text.split(/\r?\n/).filter(Boolean);
   const columns = (lines[0] ?? "").split(/[,;]/).map((value) => value.trim());
   if (lines.length < 2 || lines.length > 2_000 || columns.length < 2 || columns.length > 40) {
     return { id, name: file.name, kind, status: "blocked", message: "Estrutura incompatível: use entre 2 e 2.000 linhas e 2 a 40 colunas." };
   }
-  return { id, name: file.name, kind, status: "ready", message: "CSV validado localmente. Dados identificáveis são permitidos nesta sessão.", rows: lines.length - 1, columns: columns.length };
+  const document = parseUploadedCsv(file.name, text);
+  return { id, name: file.name, kind, status: "ready", message: "CSV lido e normalizado localmente para o CFO desta sessão.", rows: lines.length - 1, columns: columns.length, document };
 }
 
-function FilesPanel({ initialFiles = [] }: { initialFiles?: File[] }) {
+function FilesPanel({ initialFiles = [], onDocumentsReady, onDocumentRemoved, onAnalyze }: { initialFiles?: File[]; onDocumentsReady: (documents: UploadedSchoolDocument[]) => void; onDocumentRemoved: (name: string) => void; onAnalyze: () => void }) {
   const [fileStates, setFileStates] = useState<LocalFileState[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const initialKeyRef = useRef("");
@@ -546,7 +570,8 @@ function FilesPanel({ initialFiles = [] }: { initialFiles?: File[] }) {
     setFileStates((current) => [...current.filter((item) => !ids.has(item.id)), ...pending]);
     const inspected = await Promise.all(acceptedFiles.map(inspectLocalFile));
     setFileStates((current) => [...current.filter((item) => !ids.has(item.id)), ...inspected]);
-  }, []);
+    onDocumentsReady(inspected.flatMap((item) => item.document ? [item.document] : []));
+  }, [onDocumentsReady]);
 
   useEffect(() => {
     const key = initialFiles.map((file) => `${file.name}:${file.size}`).join("|");
@@ -563,12 +588,12 @@ function FilesPanel({ initialFiles = [] }: { initialFiles?: File[] }) {
 
   return (
     <section className="workspace-panel files-panel" aria-labelledby="files-title">
-      <div className="panel-intro"><div><span>DADOS LOCAIS</span><h2 id="files-title">Adicione os arquivos da escola.</h2><p>Selecione até 12 PDFs e CSVs de uma vez. Dados identificáveis são permitidos, desde que você tenha autorização para utilizá-los.</p></div><a href="/private">Área privada →</a></div>
-      <input ref={inputRef} className="visually-hidden" type="file" accept=".csv,.xlsx,.pdf" multiple onChange={inspectFile} />
+      <div className="panel-intro"><div><span>DADOS LOCAIS</span><h2 id="files-title">Adicione os arquivos da escola.</h2><p>Selecione até 12 PDFs e CSVs de uma vez. Os arquivos aprovados alimentam o CFO somente nesta sessão.</p></div><a href="/private">Área privada →</a></div>
+      <input ref={inputRef} className="visually-hidden" type="file" accept=".csv,.pdf" multiple onChange={inspectFile} />
       <button className="upload-zone" type="button" onClick={() => inputRef.current?.click()}><span>＋</span><strong>Selecionar vários arquivos da escola</strong><small>PDF e CSV · até 12 arquivos · máximo 5 MB por arquivo · leitura somente nesta sessão</small></button>
       <div className="privacy-strip"><span>✓ múltiplos arquivos</span><span>✓ PDF com texto</span><span>✓ sem persistência</span><span>✓ dados identificáveis permitidos</span></div>
-      {fileStates.some((file) => file.status === "ready") ? <div className="new-school-ready"><strong>Arquivos lidos nesta sessão</strong><span>PDFs e CSVs aprovados estão prontos para normalização. Eles ainda não alimentam automaticamente o CFO.</span></div> : null}
-      {fileStates.map((fileState) => <article className={`file-result ${fileState.status}`} aria-live="polite" key={fileState.id}><div><span>{fileState.status === "ready" ? fileState.kind : "!"}</span><div><strong>{fileState.name}</strong><p>{fileState.message}</p>{fileState.rows ? <small>{fileState.rows} linhas · {fileState.columns} colunas · pronto para normalização</small> : null}{fileState.pages ? <small>{fileState.pages} páginas · {fileState.characters?.toLocaleString("pt-BR")} caracteres extraídos</small> : null}</div></div><button type="button" onClick={() => setFileStates((current) => current.filter((file) => file.id !== fileState.id))}>Remover</button></article>)}
+      {fileStates.some((file) => file.document) ? <div className="new-school-ready"><strong>Arquivos conectados ao CFO</strong><span>A próxima resposta usará somente os dados normalizados da escola enviada.</span><button type="button" onClick={onAnalyze}>Ir para a conversa →</button></div> : null}
+      {fileStates.map((fileState) => <article className={`file-result ${fileState.status}`} aria-live="polite" key={fileState.id}><div><span>{fileState.status === "ready" ? fileState.kind : "!"}</span><div><strong>{fileState.name}</strong><p>{fileState.message}</p>{fileState.rows ? <small>{fileState.rows} linhas · {fileState.columns} colunas · dados mapeados</small> : null}{fileState.pages ? <small>{fileState.pages} páginas · {fileState.characters?.toLocaleString("pt-BR")} caracteres extraídos</small> : null}{fileState.document?.warnings.map((warning) => <small key={warning}>Atenção: {warning}</small>)}</div></div><button type="button" onClick={() => { setFileStates((current) => current.filter((file) => file.id !== fileState.id)); onDocumentRemoved(fileState.name); }}>Remover</button></article>)}
       <div className="file-flow"><div><b>1</b><span><strong>Ler</strong><small>PDF e CSV no navegador</small></span></div><div><b>2</b><span><strong>Validar</strong><small>tipo, tamanho e estrutura</small></span></div><div><b>3</b><span><strong>Normalizar</strong><small>mapear ou preservar UNKNOWN</small></span></div><div><b>4</b><span><strong>Reconciliar</strong><small>confirmar totais antes de responder</small></span></div></div>
     </section>
   );
@@ -608,12 +633,15 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
   const [firstAnalysis, setFirstAnalysis] = useState<CfoAnalysis | null>(null);
   const [latestAnalysis, setLatestAnalysis] = useState<CfoAnalysis | null>(null);
   const [followUpTurns, setFollowUpTurns] = useState<FollowUpTurn[]>([]);
+  const [uploadedDocuments, setUploadedDocuments] = useState<UploadedSchoolDocument[]>([]);
   const [analysisError, setAnalysisError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [completedTasks, setCompletedTasks] = useState<string[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const nextTurnIdRef = useRef(1);
+  const uploadedBusinessName = uploadedDocuments.find((document) => document.businessName)?.businessName ?? "Escola enviada";
+  const hasUploadedSchool = uploadedDocuments.length > 0;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -626,6 +654,17 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
+  const mergeUploadedDocuments = useCallback((documents: UploadedSchoolDocument[]) => {
+    setUploadedDocuments((current) => {
+      const names = new Set(documents.map((document) => document.name));
+      return [...current.filter((document) => !names.has(document.name)), ...documents];
+    });
+  }, []);
+
+  const removeUploadedDocument = useCallback((name: string) => {
+    setUploadedDocuments((current) => current.filter((document) => document.name !== name));
+  }, []);
+
   const processMessage = async (message: string) => {
     const cleanMessage = message.trim();
     if (!cleanMessage || isThinking) return;
@@ -635,14 +674,20 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
     if (currentStage === "ready") setFirstQuestion(cleanMessage);
     else if (currentStage === "question") setContextAnswer(cleanMessage);
     else if (followUpId !== null) setFollowUpTurns((current) => [...current, { id: followUpId, question: cleanMessage }]);
-    setAnalysisError(""); setIsThinking(true);
+    setAnalysisError("");
+    if (!hasUploadedSchool && /(?:avali|analis).*(?:minha|meu).*(?:escola|empresa)|(?:minha|meu).*(?:escola|empresa)/iu.test(cleanMessage)) {
+      setAnalysisError("Para avaliar a sua escola, abra Arquivos, envie ao menos um PDF ou CSV e toque em “Analisar minha escola agora”. Sem arquivos próprios, eu só posso demonstrar o caso sintético da Escola Horizonte.");
+      setStage(currentStage === "ready" ? "question" : currentStage);
+      return;
+    }
+    setIsThinking(true);
     try {
       const previous = [firstQuestion, contextAnswer, ...followUpTurns.map((turn) => turn.question)].filter(Boolean);
       const response = await fetch("/api/analyze", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ caseState: buildPublicCfoCaseState(cleanMessage, previous) }),
+        body: JSON.stringify({ caseState: hasUploadedSchool ? buildUploadedCfoCaseState(cleanMessage, previous, uploadedDocuments) : buildPublicCfoCaseState(cleanMessage, previous) }),
       });
       const payload = await response.json() as CfoAnalysis | { message?: string };
       if (!response.ok || !("mode" in payload)) {
@@ -670,7 +715,7 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
       <DemoSidebar open={sidebarOpen} activeView={activeView} onClose={() => setSidebarOpen(false)} onReset={resetDemo} onNavigate={setActiveView} />
       <section className="chat-column" aria-label="Workspace Veralis">
         <header className="demo-header launch-header">
-          <div className="demo-title-area"><button className="sidebar-trigger" type="button" onClick={() => setSidebarOpen(true)} aria-label="Abrir menu">☰</button><button className="brand-button mobile-brand" type="button" onClick={onExit} aria-label="Voltar para a página inicial"><BrandMark compact /></button><div className="conversation-title"><strong>{viewTitles[activeView]}</strong><span><i /> Escola Horizonte · 100% sintética</span></div></div>
+          <div className="demo-title-area"><button className="sidebar-trigger" type="button" onClick={() => setSidebarOpen(true)} aria-label="Abrir menu">☰</button><button className="brand-button mobile-brand" type="button" onClick={onExit} aria-label="Voltar para a página inicial"><BrandMark compact /></button><div className="conversation-title"><strong>{hasUploadedSchool && activeView === "chat" ? "Conversa sobre a escola enviada" : viewTitles[activeView]}</strong><span><i /> {hasUploadedSchool ? `${uploadedBusinessName} · arquivos desta sessão` : "Escola Horizonte · 100% sintética"}</span></div></div>
           <div className="demo-actions"><span className="safe-mode"><i /> Demo segura</span><button className="reset-button" type="button" onClick={resetDemo}>↺ <span>Reset demo</span></button><ThemeButton theme={theme} onToggle={onTheme} /></div>
         </header>
         <div className="synthetic-banner" role="note"><span aria-hidden="true">◇</span><p><strong>Ambiente de demonstração.</strong> Não envie informações pessoais ou financeiras reais.</p></div>
@@ -679,9 +724,9 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
           {activeView === "overview" ? <OverviewPanel completed={completedTasks} onToggle={toggleTask} onNavigate={setActiveView} /> : null}
           {activeView === "performance" ? <PerformancePanel /> : null}
           {activeView === "plan" ? <ActionPlanPanel /> : null}
-          {activeView === "files" ? <FilesPanel initialFiles={initialFiles} /> : null}
+          {activeView === "files" ? <FilesPanel initialFiles={initialFiles} onDocumentsReady={mergeUploadedDocuments} onDocumentRemoved={removeUploadedDocument} onAnalyze={() => { resetDemo(); setInput("Analise os arquivos enviados e diga o que merece atenção primeiro."); setActiveView("chat"); requestAnimationFrame(() => inputRef.current?.focus()); }} /> : null}
           {activeView === "questions" ? <QuestionsPanel onUse={(question) => { setInput(question); setActiveView("chat"); requestAnimationFrame(() => inputRef.current?.focus()); }} /> : null}
-          {activeView === "chat" ? <section className="conversation" aria-label="Conversa com a Veralis"><div className="conversation-inner"><div className="date-divider"><span>Hoje</span></div><article className="assistant-message assistant-message--welcome"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>agora</span></div></div><div className="message-content"><p className="answer-lede">Carreguei os dados sintéticos da Escola Horizonte.</p><p className="answer-copy">Pergunte ao seu CFO. A origem da resposta aparecerá em cada análise.</p></div></article>{stage === "ready" ? <div className="quick-prompts" aria-label="Perguntas sugeridas">{quickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => processMessage(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div> : null}{firstQuestion ? <article className="user-message"><span>Você</span><p>{firstQuestion}</p></article> : null}{firstAnalysis ? <InitialDiagnosis analysis={firstAnalysis} /> : null}{contextAnswer ? <article className="user-message"><span>Você</span><p>{contextAnswer}</p></article> : null}{latestAnalysis ? <RevisedDiagnosis analysis={latestAnalysis} /> : null}{followUpTurns.map((turn) => <FollowUpExchange key={turn.id} turn={turn} />)}{analysisError ? <article className="assistant-message"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>não enviado</span></div></div><div className="message-content"><p className="answer-copy">{analysisError}</p></div></article> : null}{isThinking ? <div className="thinking" role="status" aria-live="polite"><span className="assistant-avatar" aria-hidden="true">V</span><div><i /><i /><i /></div><p>{stage === "ready" ? "OpenAI analisando os indicadores" : "Atualizando o diagnóstico"}</p></div> : null}<div ref={endRef} /></div></section> : null}
+          {activeView === "chat" ? <section className="conversation" aria-label="Conversa com a Veralis"><div className="conversation-inner"><div className="date-divider"><span>Hoje</span></div><article className="assistant-message assistant-message--welcome"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>agora</span></div></div><div className="message-content"><p className="answer-lede">{hasUploadedSchool ? `Carreguei ${uploadedDocuments.length} arquivo${uploadedDocuments.length === 1 ? "" : "s"} de ${uploadedBusinessName}.` : "Carreguei os dados sintéticos da Escola Horizonte."}</p><p className="answer-copy">{hasUploadedSchool ? "As respostas desta conversa usarão somente os indicadores normalizados desses arquivos." : "Pergunte sobre a demo ou envie seus arquivos em Arquivos para avaliar outra escola."}</p></div></article>{stage === "ready" ? <div className="quick-prompts" aria-label="Perguntas sugeridas">{quickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => processMessage(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div> : null}{firstQuestion ? <article className="user-message"><span>Você</span><p>{firstQuestion}</p></article> : null}{firstAnalysis ? (hasUploadedSchool ? <UploadedDiagnosis analysis={firstAnalysis} /> : <InitialDiagnosis analysis={firstAnalysis} />) : null}{contextAnswer ? <article className="user-message"><span>Você</span><p>{contextAnswer}</p></article> : null}{latestAnalysis ? (hasUploadedSchool ? <UploadedDiagnosis analysis={latestAnalysis} /> : <RevisedDiagnosis analysis={latestAnalysis} />) : null}{followUpTurns.map((turn) => <FollowUpExchange key={turn.id} turn={turn} />)}{analysisError ? <article className="assistant-message"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>ação necessária</span></div></div><div className="message-content"><p className="answer-copy">{analysisError}</p></div></article> : null}{isThinking ? <div className="thinking" role="status" aria-live="polite"><span className="assistant-avatar" aria-hidden="true">V</span><div><i /><i /><i /></div><p>{hasUploadedSchool ? "OpenAI analisando os arquivos da sua escola" : stage === "ready" ? "OpenAI analisando os indicadores" : "Atualizando o diagnóstico"}</p></div> : null}<div ref={endRef} /></div></section> : null}
         </div>
 
         <div className="composer-wrap launch-composer"><form className="composer" onSubmit={submit}><button className="attach-button" type="button" onClick={() => setActiveView("files")} aria-label="Abrir entrada de arquivos" title="Arquivos">＋</button><textarea ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={onKeyDown} rows={1} aria-label="Mensagem para a Veralis" placeholder={stage === "question" ? "Conte o que mudou na operação..." : "Pergunte à Veralis..."} /><button className="voice-button" type="button" aria-label="Áudio ainda não disponível" title="Áudio entra na próxima etapa">●</button><button className="send-button" type="submit" disabled={!input.trim() || isThinking} aria-label="Enviar mensagem">↑</button></form><p>Enter para enviar · Shift + Enter para nova linha · voz em preparação</p></div>

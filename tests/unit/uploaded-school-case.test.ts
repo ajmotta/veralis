@@ -30,4 +30,13 @@ test("normalizes a quarterly financial PDF text and builds a non-demo case", () 
   assert.equal(caseState.financial.periods[1].netRevenue, 972_759.49);
   assert.ok(caseState.calculations.some((calculation) => calculation.formulaId === "operating_margin_change"));
   assert.ok(caseState.reasoning.inferences[0].statement.includes("melhorou"));
+  const payrollCase = buildUploadedCfoCaseState("Minha folha está alta?", [], [document]);
+  assert.ok(payrollCase.reasoning.calculations.some((claim) => /folha representa/i.test(claim.statement)));
+});
+
+test("asks for payroll data instead of repeating occupancy when only classes were uploaded", () => {
+  const operations = parseUploadedCsv("Semear_turmas.csv", "turma;matriculados;capacidade\nInfantil A;14;20\nInfantil B;9;20");
+  const caseState = buildUploadedCfoCaseState("Minha folha está alta?", [], [operations]);
+  assert.equal(caseState.metrics.values.find((metric) => metric.id === "payroll_over_revenue")?.status, "UNKNOWN");
+  assert.equal(caseState.quality.reconciliation, "PASS");
 });

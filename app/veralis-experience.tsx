@@ -510,7 +510,7 @@ async function inspectPdf(file: File): Promise<Pick<LocalFileState, "status" | "
       let pageText = "";
       for (const item of content.items) {
         if (!("str" in item)) continue;
-        pageText += `${item.str}${"hasEOL" in item && item.hasEOL ? "\n" : " "}`;
+        if (item.str.trim()) pageText += `${item.str}\n`;
       }
       characters += pageText.length;
       pageTexts.push(pageText);

@@ -9,6 +9,7 @@ import { routeExpertLenses } from "../../src/ai/orchestration/routing";
 import { synthesizeDeterministicResponse } from "../../src/ai/orchestration/synthesizer";
 import { hasExactlyOneQuestion, selectNextQuestion } from "../../src/ai/orchestration/unknowns";
 import { verifyStructuredResponse } from "../../src/ai/orchestration/verifier";
+import { buildUploadedCfoCaseState, parseUploadedCsv, parseUploadedPdfText } from "../../src/demo/uploaded-school-case";
 import type { CaseState } from "../../src/domain/schemas/case-state";
 
 function makeCase(overrides: Partial<CaseState> = {}): CaseState {
@@ -338,4 +339,24 @@ test("analyze route rejects oversized authenticated payloads", async () => {
   }));
   assert.equal(response.status, 413);
   assert.equal((await response.json() as { error: string }).error, "PAYLOAD_TOO_LARGE");
+});
+
+test("uploaded school answers a payroll question with payroll evidence", () => {
+  const document = parseUploadedPdfText("Semear_DRE.pdf", [
+    "COLÉGIO SEMEAR S/S LTDA", "CNPJ 00.000.000/0001-00", "Conta", "1T/2026", "2T/2026",
+    "RECEITA LÍQUIDA", "967.223,83", "972.759,49",
+    "Pessoal docente", "-287.432,96", "-290.662,24",
+    "Pessoal administrativo", "-105.623,29", "-106.108,82",
+    "Encargos e provisões", "-149.361,38", "-150.773,00",
+    "RESULTADO OPERACIONAL", "30.883,17", "116.448,86",
+  ].join("\n"));
+  const response = synthesizeDeterministicResponse(buildUploadedCfoCaseState("Minha folha está alta?", [], [document]));
+  assert.match(response.directAnswer, /folha representa/i);
+});
+
+test("uploaded school asks for payroll instead of repeating occupancy when payroll is absent", () => {
+  const operations = parseUploadedCsv("Semear_turmas.csv", "turma;matriculados;capacidade\nInfantil A;14;20\nInfantil B;9;20");
+  const response = synthesizeDeterministicResponse(buildUploadedCfoCaseState("Minha folha está alta?", [], [operations]));
+  assert.equal(response.nextQuestion, "Qual é o custo total da folha no período analisado?");
+  assert.doesNotMatch(response.directAnswer, /ocupação/i);
 });

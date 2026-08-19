@@ -18,9 +18,23 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 function primaryClaim(caseState: CaseState): Claim | undefined {
-  return caseState.reasoning.inferences[0]
-    ?? caseState.reasoning.calculations[0]
-    ?? caseState.reasoning.facts[0];
+  const candidates = [
+    ...caseState.reasoning.inferences,
+    ...caseState.reasoning.calculations,
+    ...caseState.reasoning.facts,
+  ];
+  const query = caseState.objective.currentQuestion.toLocaleLowerCase("pt-BR");
+  const preferredPattern = /folha|sal[aá]rio|pessoal/u.test(query)
+    ? /folha|sal[aá]rio|pessoal/u
+    : /ocupa|vaga|matr[ií]cula|turma/u.test(query)
+      ? /ocupa|vaga|matr[ií]cula|turma/u
+      : /margem|resultado|rentab/u.test(query)
+        ? /margem|resultado|rentab/u
+        : null;
+  if (preferredPattern) {
+    return candidates.find((claim) => preferredPattern.test(claim.statement.toLocaleLowerCase("pt-BR")));
+  }
+  return candidates[0];
 }
 
 function buildDisagreements(caseState: CaseState, views: ExpertView[]): string[] {

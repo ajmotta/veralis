@@ -27,7 +27,14 @@ function questionForConflict(conflict: SourceConflict): QuestionCandidate {
 
 function questionForMetric(metric: MetricValue, query: string): QuestionCandidate {
   const metricKey = metric.id.toLocaleLowerCase("pt-BR");
-  const isRelevant = query.includes(metricKey.replaceAll("_", " "));
+  const synonymMatch = metricKey === "payroll_over_revenue"
+    ? /folha|sal[aá]rio|pessoal/u.test(query)
+    : metricKey === "occupancy"
+      ? /ocupa|vaga|matr[ií]cula|turma/u.test(query)
+      : metricKey === "revenue_per_student"
+        ? /receita.*aluno|ticket/u.test(query)
+        : false;
+  const isRelevant = synonymMatch || query.includes(metricKey.replaceAll("_", " "));
   return {
     score: isRelevant ? 500 : 200,
     key: `metric:${metric.id}:${metric.period}`,

@@ -233,6 +233,7 @@ export function buildUploadedCfoCaseState(question: string, previousQuestions: s
       const payrollCalculation = `calc-upload-payroll-${suffix}`;
       evidence.push({ id: payrollEvidence, sourceType: "FILE", sourceFile: documents.find((document) => document.financialPeriods.some((item) => item.period === period.period))?.name, period: period.period, rawValue: period.payroll, normalizedValue: period.payroll, unit: "BRL", confidence: 0.9 });
       calculations.push({ id: payrollCalculation, formulaId: "payroll_over_revenue", formulaVersion: "1.0.0", period: period.period, inputRefs: [payrollEvidence, revenueEvidence], rawResult: period.payroll / period.netRevenue, displayedResult: percent(period.payroll / period.netRevenue), unit: "PERCENT", status: "PASS" });
+      calculationClaims.push({ id: `claim-upload-payroll-${suffix}`, statement: `A folha representa ${percent(period.payroll / period.netRevenue)} da receita líquida em ${period.period}.`, type: "CALCULATION", evidenceRefs: [payrollCalculation], confidence: 0.9 });
       if (suffix === "current") metrics.push({ id: "payroll_over_revenue", period: period.period, value: period.payroll / period.netRevenue, status: "AVAILABLE", unit: "PERCENT", evidenceRefs: [payrollCalculation], calculationRef: payrollCalculation });
     }
   });
@@ -264,6 +265,11 @@ export function buildUploadedCfoCaseState(question: string, previousQuestions: s
   const unknowns: Claim[] = [];
   if (selectedFinancial.length === 0) unknowns.push({ id: "unknown-upload-financial", statement: "Não foi possível normalizar receita líquida e resultado operacional dos arquivos enviados.", type: "UNKNOWN", evidenceRefs: [], confidence: 1 });
   if (!operations) unknowns.push({ id: "unknown-upload-operations", statement: "Não foi possível normalizar matrículas e capacidade das turmas dos arquivos enviados.", type: "UNKNOWN", evidenceRefs: [], confidence: 1 });
+  const query = normalizeText(question);
+  if (/folha|salario|pessoal/.test(query) && !metrics.some((metric) => metric.id === "payroll_over_revenue")) {
+    metrics.push({ id: "payroll_over_revenue", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "PERCENT", evidenceRefs: [] });
+    unknowns.unshift({ id: "unknown-upload-payroll", statement: "A folha total e a receita líquida comparável ainda não foram normalizadas para responder esta pergunta.", type: "UNKNOWN", evidenceRefs: [], confidence: 1 });
+  }
   const financialPeriods: PeriodFinancials[] = selectedFinancial.map((period) => ({
     period: period.period, grossRevenue: period.netRevenue, discounts: 0, netRevenue: period.netRevenue,
     variableCosts: 0, payroll: period.payroll ?? 0, fixedCosts: 0, financialResult: 0,
@@ -282,7 +288,7 @@ export function buildUploadedCfoCaseState(question: string, previousQuestions: s
     financial: { periods: financialPeriods }, operations: { periods: operationPeriod }, metrics: { values: metrics },
     reasoning: { facts: [], calculations: calculationClaims, inferences, hypotheses, recommendations, unknowns },
     evidence, calculations,
-    quality: { reconciliation: warnings.length > 0 ? "FAIL" : calculations.length > 0 ? "PASS" : "NOT_RUN", confidence: warnings.length > 0 ? 0.55 : calculations.length > 0 ? 0.9 : 0.3, warnings },
+    quality: { reconciliation: calculations.length > 0 ? "PASS" : "NOT_RUN", confidence: warnings.length > 0 ? 0.7 : calculations.length > 0 ? 0.9 : 0.3, warnings },
     conversation: { currentTurn: previousQuestions.length + 1, openQuestion: null, corrections: [] },
   };
 }

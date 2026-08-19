@@ -1,0 +1,11 @@
+# Veralis
+
+Veralis é uma demonstração de apoio à decisão financeira para escolas privadas de Educação Infantil.
+
+- A demonstração pública usa somente dados sintéticos da Escola Horizonte.
+- O benchmark regional é experimental e sintético; não representa pesquisa real de mercado.
+- A Veralis preserva incertezas e não deve inventar dados ausentes.
+- Nenhum dado pessoal de crianças, famílias, funcionários ou escolas terceiras deve ser enviado.
+- As respostas apoiam decisões e não substituem aconselhamento contábil, jurídico ou pedagógico.
+
+Página principal: /

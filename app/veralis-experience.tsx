@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { buildPublicCfoCaseState } from "../src/demo/public-cfo-case";
 
 type Theme = "dark" | "light";
@@ -59,7 +59,13 @@ function ThemeButton({ theme, onToggle }: { theme: Theme; onToggle: () => void }
   );
 }
 
-function HomeScreen({ onStart, theme, onTheme }: { onStart: () => void; theme: Theme; onTheme: () => void }) {
+function HomeScreen({ onStart, onNewSchool, theme, onTheme }: { onStart: () => void; onNewSchool: (files: File[]) => void; theme: Theme; onTheme: () => void }) {
+  const schoolInputRef = useRef<HTMLInputElement>(null);
+  const selectSchoolFiles = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length > 0) onNewSchool(files);
+  };
   return (
     <main className="home-shell">
       <div className="ambient-aurora" aria-hidden="true" />
@@ -85,6 +91,12 @@ function HomeScreen({ onStart, theme, onTheme }: { onStart: () => void; theme: T
             </button>
             <p>Pergunta antes de presumir. Calcula antes de responder.</p>
           </div>
+          <input ref={schoolInputRef} className="visually-hidden" type="file" accept=".csv,.xlsx,.pdf" multiple onChange={selectSchoolFiles} />
+          <button className="new-school-entry" type="button" onClick={() => schoolInputRef.current?.click()}>
+            <span aria-hidden="true">＋</span>
+            <span><small>NOVA ESCOLA</small><strong>Subir arquivos para avaliar</strong><em>Selecione CSV, XLSX ou PDF · validação antes do envio</em></span>
+            <b aria-hidden="true">↗</b>
+          </button>
         </div>
 
         <div className="conversation-preview" aria-label="Prévia de uma análise da Veralis">
@@ -413,54 +425,59 @@ function ActionPlanPanel() {
   );
 }
 
-type LocalFileState = { name: string; status: "checking" | "ready" | "blocked"; message: string; rows?: number; columns?: number } | null;
+type LocalFileState = { name: string; status: "checking" | "ready" | "blocked"; message: string; rows?: number; columns?: number };
 
-function FilesPanel() {
-  const [fileState, setFileState] = useState<LocalFileState>(null);
+async function inspectLocalFile(file: File): Promise<LocalFileState> {
+  if (file.size > 5 * 1024 * 1024) return { name: file.name, status: "blocked", message: "Arquivo bloqueado: limite local de 5 MB." };
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (extension === "pdf") return { name: file.name, status: "blocked", message: "PDF recebido, mas a leitura financeira ainda não está ativa nesta demonstração pública." };
+  if (extension === "xlsx") return { name: file.name, status: "blocked", message: "XLSX recebido, mas o processamento seguro ainda depende da área privada." };
+  if (extension !== "csv") return { name: file.name, status: "blocked", message: "Formato incompatível. Use CSV, XLSX ou PDF." };
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  const columns = (lines[0] ?? "").split(/[,;]/).map((value) => value.trim().toLowerCase());
+  if (lines.length < 2 || lines.length > 2_000 || columns.length < 2 || columns.length > 40) {
+    return { name: file.name, status: "blocked", message: "Estrutura incompatível: use entre 2 e 2.000 linhas e 2 a 40 colunas." };
+  }
+  const piiHeader = columns.some((column) => /^(nome|cpf|e-?mail|telefone|celular|data[_ ]?de[_ ]?nascimento|nome[_ ]?do[_ ]?aluno|crianca)$/.test(column));
+  const sample = lines.slice(0, 30).join("\n");
+  const piiContent = /[\w.+-]+@[\w.-]+\.[a-z]{2,}|\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/i.test(sample);
+  if (piiHeader || piiContent) return { name: file.name, status: "blocked", message: "Possível dado pessoal detectado. Remova nomes, CPF, email, telefone e dados de crianças antes de continuar." };
+  return { name: file.name, status: "ready", message: "CSV validado localmente. O arquivo não foi enviado nem persistido.", rows: lines.length - 1, columns: columns.length };
+}
+
+function FilesPanel({ initialFiles = [] }: { initialFiles?: File[] }) {
+  const [fileStates, setFileStates] = useState<LocalFileState[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const initialKeyRef = useRef("");
 
-  const inspectFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+  const inspectFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
+    setFileStates(files.map((file) => ({ name: file.name, status: "checking", message: "Validando extensão, tamanho e possíveis dados pessoais…" })));
+    setFileStates(await Promise.all(files.map(inspectLocalFile)));
+  }, []);
+
+  useEffect(() => {
+    const key = initialFiles.map((file) => `${file.name}:${file.size}`).join("|");
+    if (!key || key === initialKeyRef.current) return;
+    initialKeyRef.current = key;
+    void inspectFiles(initialFiles);
+  }, [initialFiles, inspectFiles]);
+
+  const inspectFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
     event.target.value = "";
-    if (!file) return;
-    setFileState({ name: file.name, status: "checking", message: "Validando extensão, tamanho e possíveis dados pessoais…" });
-    if (file.size > 5 * 1024 * 1024) {
-      setFileState({ name: file.name, status: "blocked", message: "Arquivo bloqueado: limite local de 5 MB." });
-      return;
-    }
-    const extension = file.name.split(".").pop()?.toLowerCase();
-    if (extension !== "csv" && extension !== "xlsx") {
-      setFileState({ name: file.name, status: "blocked", message: "Formato incompatível. Use CSV; XLSX é aceito somente na área privada." });
-      return;
-    }
-    if (extension === "xlsx") {
-      setFileState({ name: file.name, status: "blocked", message: "XLSX não é aberto na demo pública. Entre na área privada para o processamento seguro, sem macros." });
-      return;
-    }
-    const text = await file.text();
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    const columns = (lines[0] ?? "").split(/[,;]/).map((value) => value.trim().toLowerCase());
-    if (lines.length < 2 || lines.length > 2_000 || columns.length < 2 || columns.length > 40) {
-      setFileState({ name: file.name, status: "blocked", message: "Estrutura incompatível: use entre 2 e 2.000 linhas e 2 a 40 colunas." });
-      return;
-    }
-    const piiHeader = columns.some((column) => /^(nome|cpf|e-?mail|telefone|celular|data[_ ]?de[_ ]?nascimento|nome[_ ]?do[_ ]?aluno|crianca)$/.test(column));
-    const sample = lines.slice(0, 30).join("\n");
-    const piiContent = /[\w.+-]+@[\w.-]+\.[a-z]{2,}|\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/i.test(sample);
-    if (piiHeader || piiContent) {
-      setFileState({ name: file.name, status: "blocked", message: "Possível dado pessoal detectado. Remova nomes, CPF, email, telefone e dados de crianças antes de continuar." });
-      return;
-    }
-    setFileState({ name: file.name, status: "ready", message: "CSV validado localmente. O arquivo não foi enviado nem persistido.", rows: lines.length - 1, columns: columns.length });
+    void inspectFiles(files);
   };
 
   return (
     <section className="workspace-panel files-panel" aria-labelledby="files-title">
       <div className="panel-intro"><div><span>DADOS LOCAIS</span><h2 id="files-title">Traga números, não identidades.</h2><p>A demonstração valida CSV no seu navegador e bloqueia sinais de dados pessoais antes de qualquer análise.</p></div><a href="/private">Área privada →</a></div>
-      <input ref={inputRef} className="visually-hidden" type="file" accept=".csv,.xlsx" onChange={inspectFile} />
-      <button className="upload-zone" type="button" onClick={() => inputRef.current?.click()}><span>＋</span><strong>Selecionar CSV ou XLSX</strong><small>CSV: validação local · XLSX: somente área privada · máximo 5 MB</small></button>
+      <input ref={inputRef} className="visually-hidden" type="file" accept=".csv,.xlsx,.pdf" multiple onChange={inspectFile} />
+      <button className="upload-zone" type="button" onClick={() => inputRef.current?.click()}><span>＋</span><strong>Selecionar arquivos da escola</strong><small>CSV: validação local · XLSX/PDF: recebidos com limitação explícita · máximo 5 MB cada</small></button>
       <div className="privacy-strip"><span>✓ sem persistência</span><span>✓ sem macros</span><span>✓ bloqueio de PII</span><span>✓ UNKNOWN preservado</span></div>
-      {fileState ? <article className={`file-result ${fileState.status}`} aria-live="polite"><div><span>{fileState.status === "ready" ? "CSV" : "!"}</span><div><strong>{fileState.name}</strong><p>{fileState.message}</p>{fileState.rows ? <small>{fileState.rows} linhas · {fileState.columns} colunas · pronto para normalização</small> : null}</div></div><button type="button" onClick={() => setFileState(null)}>Remover</button></article> : null}
+      {fileStates.some((file) => file.status === "ready") ? <div className="new-school-ready"><strong>Nova escola iniciada</strong><span>Os CSVs aprovados estão prontos para a próxima etapa de normalização. Eles ainda não alimentam o CFO.</span></div> : null}
+      {fileStates.map((fileState) => <article className={`file-result ${fileState.status}`} aria-live="polite" key={fileState.name}><div><span>{fileState.status === "ready" ? "CSV" : "!"}</span><div><strong>{fileState.name}</strong><p>{fileState.message}</p>{fileState.rows ? <small>{fileState.rows} linhas · {fileState.columns} colunas · pronto para normalização</small> : null}</div></div><button type="button" onClick={() => setFileStates((current) => current.filter((file) => file.name !== fileState.name))}>Remover</button></article>)}
       <div className="file-flow"><div><b>1</b><span><strong>Validar</strong><small>tipo, tamanho e estrutura</small></span></div><div><b>2</b><span><strong>Proteger</strong><small>detectar dados pessoais</small></span></div><div><b>3</b><span><strong>Normalizar</strong><small>mapear ou preservar UNKNOWN</small></span></div><div><b>4</b><span><strong>Reconciliar</strong><small>confirmar totais antes de responder</small></span></div></div>
     </section>
   );
@@ -490,9 +507,9 @@ function QuestionsPanel({ onUse }: { onUse: (question: string) => void }) {
   );
 }
 
-function DemoScreen({ theme, onTheme, onExit }: { theme: Theme; onTheme: () => void; onExit: () => void }) {
+function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialFiles = [] }: { theme: Theme; onTheme: () => void; onExit: () => void; initialView?: WorkspaceView; initialFiles?: File[] }) {
   const [stage, setStage] = useState<DemoStage>("ready");
-  const [activeView, setActiveView] = useState<WorkspaceView>("overview");
+  const [activeView, setActiveView] = useState<WorkspaceView>(initialView);
   const [input, setInput] = useState("");
   const [firstQuestion, setFirstQuestion] = useState("");
   const [contextAnswer, setContextAnswer] = useState("");
@@ -560,7 +577,7 @@ function DemoScreen({ theme, onTheme, onExit }: { theme: Theme; onTheme: () => v
           {activeView === "overview" ? <OverviewPanel completed={completedTasks} onToggle={toggleTask} onNavigate={setActiveView} /> : null}
           {activeView === "performance" ? <PerformancePanel /> : null}
           {activeView === "plan" ? <ActionPlanPanel /> : null}
-          {activeView === "files" ? <FilesPanel /> : null}
+          {activeView === "files" ? <FilesPanel initialFiles={initialFiles} /> : null}
           {activeView === "questions" ? <QuestionsPanel onUse={(question) => { setInput(question); setActiveView("chat"); requestAnimationFrame(() => inputRef.current?.focus()); }} /> : null}
           {activeView === "chat" ? <section className="conversation" aria-label="Conversa com a Veralis"><div className="conversation-inner"><div className="date-divider"><span>Hoje</span></div><article className="assistant-message assistant-message--welcome"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>agora</span></div></div><div className="message-content"><p className="answer-lede">Carreguei os dados sintéticos da Escola Horizonte.</p><p className="answer-copy">Pergunte ao seu CFO. A origem da resposta aparecerá em cada análise.</p></div></article>{stage === "ready" ? <div className="quick-prompts" aria-label="Perguntas sugeridas">{quickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => processMessage(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div> : null}{firstQuestion ? <article className="user-message"><span>Você</span><p>{firstQuestion}</p></article> : null}{firstAnalysis ? <InitialDiagnosis analysis={firstAnalysis} /> : null}{contextAnswer ? <article className="user-message"><span>Você</span><p>{contextAnswer}</p></article> : null}{latestAnalysis ? <RevisedDiagnosis analysis={latestAnalysis} /> : null}{analysisError ? <article className="assistant-message"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>não enviado</span></div></div><div className="message-content"><p className="answer-copy">{analysisError}</p></div></article> : null}{isThinking ? <div className="thinking" role="status" aria-live="polite"><span className="assistant-avatar" aria-hidden="true">V</span><div><i /><i /><i /></div><p>{stage === "ready" ? "OpenAI analisando os indicadores" : "Atualizando o diagnóstico"}</p></div> : null}<div ref={endRef} /></div></section> : null}
         </div>
@@ -576,6 +593,8 @@ function DemoScreen({ theme, onTheme, onExit }: { theme: Theme; onTheme: () => v
 export function VeralisExperience() {
   const [screen, setScreen] = useState<"home" | "demo">("home");
   const [theme, setTheme] = useState<Theme>("dark");
+  const [initialView, setInitialView] = useState<WorkspaceView>("overview");
+  const [initialFiles, setInitialFiles] = useState<File[]>([]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -598,8 +617,8 @@ export function VeralisExperience() {
   };
 
   return screen === "home" ? (
-    <HomeScreen onStart={() => setScreen("demo")} theme={theme} onTheme={toggleTheme} />
+    <HomeScreen onStart={() => { setInitialView("overview"); setInitialFiles([]); setScreen("demo"); }} onNewSchool={(files) => { setInitialView("files"); setInitialFiles(files); setScreen("demo"); }} theme={theme} onTheme={toggleTheme} />
   ) : (
-    <DemoScreen theme={theme} onTheme={toggleTheme} onExit={() => setScreen("home")} />
+    <DemoScreen theme={theme} onTheme={toggleTheme} onExit={() => setScreen("home")} initialView={initialView} initialFiles={initialFiles} />
   );
 }

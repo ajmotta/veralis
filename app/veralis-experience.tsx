@@ -20,6 +20,13 @@ type CfoAnalysis = {
   };
 };
 
+type FollowUpTurn = {
+  id: number;
+  question: string;
+  analysis?: CfoAnalysis;
+  error?: string;
+};
+
 const quickPrompts = [
   "Por que minha margem caiu?",
   "Meu reajuste funcionou?",
@@ -259,6 +266,31 @@ function RevisedDiagnosis({ analysis }: { analysis: CfoAnalysis }) {
         {openPanel ? <DetailPanel panel={openPanel} /> : null}
       </div>
     </article>
+  );
+}
+
+function FollowUpExchange({ turn }: { turn: FollowUpTurn }) {
+  return (
+    <>
+      <article className="user-message"><span>Você</span><p>{turn.question}</p></article>
+      {turn.analysis ? <article className="assistant-message assistant-message--follow-up" aria-label="Resposta de acompanhamento da Veralis">
+        <div className="message-heading">
+          <span className="assistant-avatar" aria-hidden="true">V</span>
+          <div><strong>Veralis</strong><span>agora</span></div>
+        </div>
+        <div className="message-content">
+          <AnalysisOrigin analysis={turn.analysis} />
+          <p className="answer-lede">{turn.analysis.response.directAnswer}</p>
+          {turn.analysis.response.diagnosis.secondaryDrivers.length > 0 ? <p className="answer-copy">{turn.analysis.response.diagnosis.secondaryDrivers.slice(0, 3).join(" ")}</p> : null}
+          {turn.analysis.response.recommendation.immediate?.action ? <div className="follow-up-action"><span>Próxima ação</span><p>{turn.analysis.response.recommendation.immediate.action}</p></div> : null}
+          {turn.analysis.response.nextQuestion ? <div className="next-question"><span>Para aprofundar</span><p>{turn.analysis.response.nextQuestion}</p></div> : null}
+        </div>
+      </article> : null}
+      {turn.error ? <article className="assistant-message" aria-label="Falha ao responder">
+        <div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>não enviado</span></div></div>
+        <div className="message-content"><p className="answer-copy">{turn.error}</p></div>
+      </article> : null}
+    </>
   );
 }
 
@@ -575,30 +607,37 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
   const [isThinking, setIsThinking] = useState(false);
   const [firstAnalysis, setFirstAnalysis] = useState<CfoAnalysis | null>(null);
   const [latestAnalysis, setLatestAnalysis] = useState<CfoAnalysis | null>(null);
+  const [followUpTurns, setFollowUpTurns] = useState<FollowUpTurn[]>([]);
   const [analysisError, setAnalysisError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [completedTasks, setCompletedTasks] = useState<string[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const nextTurnIdRef = useRef(1);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [stage, isThinking]);
+  }, [stage, isThinking, followUpTurns.length]);
 
   const resetDemo = () => {
     setStage("ready"); setInput(""); setFirstQuestion(""); setContextAnswer(""); setIsThinking(false);
-    setFirstAnalysis(null); setLatestAnalysis(null); setAnalysisError("");
+    setFirstAnalysis(null); setLatestAnalysis(null); setFollowUpTurns([]); setAnalysisError("");
+    nextTurnIdRef.current = 1;
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
   const processMessage = async (message: string) => {
     const cleanMessage = message.trim();
     if (!cleanMessage || isThinking) return;
+    const currentStage = stage;
+    const followUpId = currentStage === "revised" ? nextTurnIdRef.current++ : null;
     setActiveView("chat"); setInput("");
-    if (stage === "ready") setFirstQuestion(cleanMessage); else setContextAnswer(cleanMessage);
+    if (currentStage === "ready") setFirstQuestion(cleanMessage);
+    else if (currentStage === "question") setContextAnswer(cleanMessage);
+    else if (followUpId !== null) setFollowUpTurns((current) => [...current, { id: followUpId, question: cleanMessage }]);
     setAnalysisError(""); setIsThinking(true);
     try {
-      const previous = [firstQuestion, contextAnswer].filter(Boolean);
+      const previous = [firstQuestion, contextAnswer, ...followUpTurns.map((turn) => turn.question)].filter(Boolean);
       const response = await fetch("/api/analyze", {
         method: "POST",
         credentials: "same-origin",
@@ -609,10 +648,14 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
       if (!response.ok || !("mode" in payload)) {
         throw new Error(("message" in payload && payload.message) || "Não foi possível concluir a análise agora.");
       }
-      if (stage === "ready") setFirstAnalysis(payload); else setLatestAnalysis(payload);
-      setStage(stage === "ready" ? "question" : "revised");
+      if (currentStage === "ready") setFirstAnalysis(payload);
+      else if (currentStage === "question") setLatestAnalysis(payload);
+      else if (followUpId !== null) setFollowUpTurns((current) => current.map((turn) => turn.id === followUpId ? { ...turn, analysis: payload } : turn));
+      setStage(currentStage === "ready" ? "question" : "revised");
     } catch (error) {
-      setAnalysisError(error instanceof Error ? error.message : "Não foi possível concluir a análise agora.");
+      const message = error instanceof Error ? error.message : "Não foi possível concluir a análise agora.";
+      if (followUpId !== null) setFollowUpTurns((current) => current.map((turn) => turn.id === followUpId ? { ...turn, error: message } : turn));
+      else setAnalysisError(message);
     } finally {
       setIsThinking(false);
     }
@@ -638,7 +681,7 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
           {activeView === "plan" ? <ActionPlanPanel /> : null}
           {activeView === "files" ? <FilesPanel initialFiles={initialFiles} /> : null}
           {activeView === "questions" ? <QuestionsPanel onUse={(question) => { setInput(question); setActiveView("chat"); requestAnimationFrame(() => inputRef.current?.focus()); }} /> : null}
-          {activeView === "chat" ? <section className="conversation" aria-label="Conversa com a Veralis"><div className="conversation-inner"><div className="date-divider"><span>Hoje</span></div><article className="assistant-message assistant-message--welcome"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>agora</span></div></div><div className="message-content"><p className="answer-lede">Carreguei os dados sintéticos da Escola Horizonte.</p><p className="answer-copy">Pergunte ao seu CFO. A origem da resposta aparecerá em cada análise.</p></div></article>{stage === "ready" ? <div className="quick-prompts" aria-label="Perguntas sugeridas">{quickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => processMessage(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div> : null}{firstQuestion ? <article className="user-message"><span>Você</span><p>{firstQuestion}</p></article> : null}{firstAnalysis ? <InitialDiagnosis analysis={firstAnalysis} /> : null}{contextAnswer ? <article className="user-message"><span>Você</span><p>{contextAnswer}</p></article> : null}{latestAnalysis ? <RevisedDiagnosis analysis={latestAnalysis} /> : null}{analysisError ? <article className="assistant-message"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>não enviado</span></div></div><div className="message-content"><p className="answer-copy">{analysisError}</p></div></article> : null}{isThinking ? <div className="thinking" role="status" aria-live="polite"><span className="assistant-avatar" aria-hidden="true">V</span><div><i /><i /><i /></div><p>{stage === "ready" ? "OpenAI analisando os indicadores" : "Atualizando o diagnóstico"}</p></div> : null}<div ref={endRef} /></div></section> : null}
+          {activeView === "chat" ? <section className="conversation" aria-label="Conversa com a Veralis"><div className="conversation-inner"><div className="date-divider"><span>Hoje</span></div><article className="assistant-message assistant-message--welcome"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>agora</span></div></div><div className="message-content"><p className="answer-lede">Carreguei os dados sintéticos da Escola Horizonte.</p><p className="answer-copy">Pergunte ao seu CFO. A origem da resposta aparecerá em cada análise.</p></div></article>{stage === "ready" ? <div className="quick-prompts" aria-label="Perguntas sugeridas">{quickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => processMessage(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div> : null}{firstQuestion ? <article className="user-message"><span>Você</span><p>{firstQuestion}</p></article> : null}{firstAnalysis ? <InitialDiagnosis analysis={firstAnalysis} /> : null}{contextAnswer ? <article className="user-message"><span>Você</span><p>{contextAnswer}</p></article> : null}{latestAnalysis ? <RevisedDiagnosis analysis={latestAnalysis} /> : null}{followUpTurns.map((turn) => <FollowUpExchange key={turn.id} turn={turn} />)}{analysisError ? <article className="assistant-message"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>não enviado</span></div></div><div className="message-content"><p className="answer-copy">{analysisError}</p></div></article> : null}{isThinking ? <div className="thinking" role="status" aria-live="polite"><span className="assistant-avatar" aria-hidden="true">V</span><div><i /><i /><i /></div><p>{stage === "ready" ? "OpenAI analisando os indicadores" : "Atualizando o diagnóstico"}</p></div> : null}<div ref={endRef} /></div></section> : null}
         </div>
 
         <div className="composer-wrap launch-composer"><form className="composer" onSubmit={submit}><button className="attach-button" type="button" onClick={() => setActiveView("files")} aria-label="Abrir entrada de arquivos" title="Arquivos">＋</button><textarea ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={onKeyDown} rows={1} aria-label="Mensagem para a Veralis" placeholder={stage === "question" ? "Conte o que mudou na operação..." : "Pergunte à Veralis..."} /><button className="voice-button" type="button" aria-label="Áudio ainda não disponível" title="Áudio entra na próxima etapa">●</button><button className="send-button" type="submit" disabled={!input.trim() || isThinking} aria-label="Enviar mensagem">↑</button></form><p>Enter para enviar · Shift + Enter para nova linha · voz em preparação</p></div>

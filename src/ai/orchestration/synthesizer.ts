@@ -24,7 +24,9 @@ function primaryClaim(caseState: CaseState): Claim | undefined {
     ...caseState.reasoning.calculations,
     ...caseState.reasoning.facts,
   ];
-  const intent = classifyCfoQuestion(caseState.objective.currentQuestion);
+  const currentIntent = classifyCfoQuestion(caseState.objective.currentQuestion);
+  const priorIntent = [...caseState.sources.userStatements].reverse().slice(1).map((item) => classifyCfoQuestion(item.text)).find((item) => item !== "GENERAL");
+  const intent = currentIntent === "GENERAL" && /^(segue|continue|mais|aprofund|detalh|e isso|e agora)/i.test(caseState.objective.currentQuestion.trim()) ? priorIntent ?? currentIntent : currentIntent;
   return intent === "GENERAL"
     ? candidates[0]
     : candidates.find((claim) => claimMatchesIntent(claim.statement, intent));
@@ -81,8 +83,14 @@ export function synthesizeDeterministicResponse(caseState: CaseState): Structure
   const route = routeExpertLenses(caseState);
   const routedViews = buildExpertViews(caseState, route.active);
   const lead = primaryClaim(caseState);
+  const intent = classifyCfoQuestion(caseState.objective.currentQuestion);
   const conflictLead = caseState.sources.conflicts[0];
-  const directAnswer = lead?.statement
+  const executiveClaims = uniqueClaims([...caseState.reasoning.inferences, ...caseState.reasoning.calculations, ...caseState.reasoning.facts])
+    .filter((claim) => /margem|receita|resultado|folha|principal linha de custo|ocupacao|desconto/i.test(claim.statement))
+    .slice(0, 6);
+  const directAnswer = intent === "EXECUTIVE_REVIEW" && executiveClaims.length > 0
+    ? `Diagnóstico executivo: ${executiveClaims.map((claim) => claim.statement).join(" ")}`
+    : lead?.statement
     ?? (conflictLead
       ? `Há um conflito de fontes para ${conflictLead.metric} em ${conflictLead.period}; não é seguro concluir antes de definir a fonte canônica.`
       : "Ainda não há evidência suficiente para concluir com segurança.");
@@ -106,7 +114,7 @@ export function synthesizeDeterministicResponse(caseState: CaseState): Structure
     directAnswer,
     diagnosis: {
       primaryDriver: lead?.statement ?? "UNKNOWN",
-      secondaryDrivers: caseState.reasoning.inferences.slice(lead ? 1 : 0, 3).map((claim) => claim.statement),
+      secondaryDrivers: (intent === "EXECUTIVE_REVIEW" ? executiveClaims.slice(1) : caseState.reasoning.inferences.slice(lead ? 1 : 0, 3)).map((claim) => claim.statement),
     },
     evidence: {
       items: uniqueClaims([

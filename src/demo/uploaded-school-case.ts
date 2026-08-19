@@ -5,9 +5,54 @@ export type UploadedFinancialPeriod = {
   period: string;
   netRevenue: number;
   operatingResult: number;
+  grossRevenue?: number;
+  discounts?: number;
+  totalExpenses?: number;
   payroll?: number;
   costCategories?: Array<{ name: string; value: number }>;
 };
+
+export function parseUploadedXlsxRows(name: string, sheets: Array<{ name: string; rows: Array<Array<string | number>> }>): UploadedSchoolDocument {
+  const warnings: string[] = [];
+  const financialPeriods: UploadedFinancialPeriod[] = [];
+  let businessName = businessNameFromFile(name);
+  for (const sheet of sheets) {
+    const headerIndex = sheet.rows.findIndex((row) => {
+      const normalized = row.map((cell) => normalizeText(String(cell ?? "")));
+      return normalized.some((cell) => /competencia|periodo/.test(cell)) && normalized.some((cell) => /receita liquida/.test(cell));
+    });
+    if (headerIndex < 0) continue;
+    const firstLabel = String(sheet.rows.slice(0, headerIndex).flat().find((cell) => typeof cell === "string" && String(cell).trim().length > 2) ?? "");
+    if (firstLabel) businessName = firstLabel.replace(/^escola\s+/i, "").trim();
+    const headers = sheet.rows[headerIndex].map((cell) => normalizeText(String(cell ?? "")));
+    const find = (pattern: RegExp) => headers.findIndex((header) => pattern.test(header));
+    const periodIndex = find(/competencia|periodo/);
+    const netRevenueIndex = find(/^receita liquida$/);
+    const resultIndex = find(/resultado operacional|resultado do mes/);
+    const totalExpensesIndex = find(/total despesas operacionais|total de despesas/);
+    const revenueIndexes = headers.map((header, index) => /^receita de |^outras receitas/.test(header) ? index : -1).filter((index) => index >= 0);
+    const discountIndex = find(/descontos e bolsas|descontos|bolsas/);
+    const payrollIndexes = headers.map((header, index) => /salarios|folha de pagamento|encargos sociais|encargos e provisoes/.test(header) ? index : -1).filter((index) => index >= 0);
+    const excludedCosts = new Set([periodIndex, netRevenueIndex, resultIndex, totalExpensesIndex, discountIndex, ...revenueIndexes]);
+    const costIndexes = headers.map((header, index) => index > netRevenueIndex && !excludedCosts.has(index) && header ? index : -1).filter((index) => index >= 0);
+    for (const row of sheet.rows.slice(headerIndex + 1)) {
+      const period = periodFromLabel(String(row[periodIndex] ?? ""));
+      const netRevenue = parseNumber(String(row[netRevenueIndex] ?? ""));
+      if (!period || netRevenue === null || netRevenue === 0) continue;
+      const totalExpenses = totalExpensesIndex >= 0 ? Math.abs(parseNumber(String(row[totalExpensesIndex] ?? "")) ?? 0) : 0;
+      const explicitResult = resultIndex >= 0 ? parseNumber(String(row[resultIndex] ?? "")) : null;
+      const operatingResult = explicitResult ?? netRevenue - totalExpenses;
+      const payroll = payrollIndexes.reduce((total, index) => total + Math.abs(parseNumber(String(row[index] ?? "")) ?? 0), 0);
+      const grossRevenue = revenueIndexes.reduce((total, index) => total + Math.abs(parseNumber(String(row[index] ?? "")) ?? 0), 0);
+      const discounts = discountIndex >= 0 ? Math.abs(parseNumber(String(row[discountIndex] ?? "")) ?? 0) : 0;
+      const individualCosts = costIndexes.map((index) => ({ name: String(sheet.rows[headerIndex][index] ?? "Custo"), value: Math.abs(parseNumber(String(row[index] ?? "")) ?? 0) })).filter((item) => item.value > 0 && !/salarios|folha de pagamento|encargos/i.test(item.name));
+      const costCategories = [...(payroll > 0 ? [{ name: "Folha e encargos", value: payroll }] : []), ...individualCosts];
+      financialPeriods.push({ period, netRevenue, operatingResult, ...(grossRevenue > 0 ? { grossRevenue } : {}), ...(discounts > 0 ? { discounts } : {}), ...(totalExpenses > 0 ? { totalExpenses } : {}), ...(payroll > 0 ? { payroll } : {}), ...(costCategories.length ? { costCategories } : {}) });
+    }
+  }
+  if (financialPeriods.length === 0) warnings.push("Não reconheci uma DRE mensal com competência e receita líquida neste XLSX.");
+  return { name, businessName, financialPeriods, warnings };
+}
 
 export type UploadedOperations = {
   students: number;
@@ -253,6 +298,18 @@ export function buildUploadedCfoCaseState(question: string, previousQuestions: s
       calculationClaims.push({ id: `claim-upload-payroll-${suffix}`, statement: `A folha representa ${percent(period.payroll / period.netRevenue)} da receita líquida em ${period.period}.`, type: "CALCULATION", evidenceRefs: [payrollCalculation], confidence: 0.9 });
       if (suffix === "current") metrics.push({ id: "payroll_over_revenue", period: period.period, value: period.payroll / period.netRevenue, status: "AVAILABLE", unit: "PERCENT", evidenceRefs: [payrollCalculation], calculationRef: payrollCalculation });
     }
+    if (period.discounts && period.grossRevenue && period.grossRevenue > 0) {
+      const discountEvidence = `ev-upload-discounts-${suffix}`;
+      const grossEvidence = `ev-upload-gross-revenue-${suffix}`;
+      const discountCalculation = `calc-upload-discount-rate-${suffix}`;
+      evidence.push(
+        { id: discountEvidence, sourceType: "FILE", sourceFile: documents.find((document) => document.financialPeriods.some((item) => item.period === period.period))?.name, period: period.period, rawValue: period.discounts, normalizedValue: period.discounts, unit: "BRL", confidence: 0.9 },
+        { id: grossEvidence, sourceType: "FILE", sourceFile: documents.find((document) => document.financialPeriods.some((item) => item.period === period.period))?.name, period: period.period, rawValue: period.grossRevenue, normalizedValue: period.grossRevenue, unit: "BRL", confidence: 0.9 },
+      );
+      calculations.push({ id: discountCalculation, formulaId: "discount_rate", formulaVersion: "1.0.0", period: period.period, inputRefs: [discountEvidence, grossEvidence], rawResult: period.discounts / period.grossRevenue, displayedResult: percent(period.discounts / period.grossRevenue), unit: "PERCENT", status: "PASS" });
+      calculationClaims.push({ id: `claim-upload-discounts-${suffix}`, statement: `Descontos e bolsas equivalem a ${percent(period.discounts / period.grossRevenue)} da receita bruta em ${period.period}.`, type: "CALCULATION", evidenceRefs: [discountCalculation], confidence: 0.9 });
+      if (suffix === "current") metrics.push({ id: "discount_rate", period: period.period, value: period.discounts / period.grossRevenue, status: "AVAILABLE", unit: "PERCENT", evidenceRefs: [discountCalculation], calculationRef: discountCalculation });
+    }
     if (period.costCategories && period.costCategories.length > 0) {
       const orderedCosts = [...period.costCategories].sort((a, b) => b.value - a.value);
       const principal = orderedCosts[0];
@@ -315,8 +372,12 @@ export function buildUploadedCfoCaseState(question: string, previousQuestions: s
   if (intent === "REVENUE" && !metrics.some((metric) => metric.id === "net_revenue")) {
     metrics.push({ id: "net_revenue", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "BRL", evidenceRefs: [] });
   }
-  if (intent === "DISCOUNTS") {
+  if (intent === "DISCOUNTS" && !metrics.some((metric) => metric.id === "discount_rate")) {
     metrics.push({ id: "discount_rate", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "PERCENT", evidenceRefs: [] });
+  }
+  if (intent === "RECEIVABLES") {
+    metrics.push({ id: "receivables_overdue_rate", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "PERCENT", evidenceRefs: [] });
+    unknowns.unshift({ id: "unknown-upload-receivables", statement: "Os arquivos atuais não trazem contas a receber, vencimentos e baixas suficientes para medir inadimplência.", type: "UNKNOWN", evidenceRefs: [], confidence: 1 });
   }
   if (intent === "CASH") {
     metrics.push({ id: "cash_balance", period: "atual", value: "UNKNOWN", status: "UNKNOWN", unit: "BRL", evidenceRefs: [] });

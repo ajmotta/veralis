@@ -2,7 +2,8 @@
 
 import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { buildPublicCfoCaseState } from "../src/demo/public-cfo-case";
-import { buildUploadedCfoCaseState, parseUploadedCsv, parseUploadedPdfText, type UploadedSchoolDocument } from "../src/demo/uploaded-school-case";
+import { buildUploadedCfoCaseState, parseUploadedCsv, parseUploadedPdfText, parseUploadedXlsxRows, type UploadedSchoolDocument } from "../src/demo/uploaded-school-case";
+import { readXlsxSheets } from "../src/demo/xlsx-parser";
 
 type Theme = "dark" | "light";
 type DemoStage = "ready" | "question" | "revised";
@@ -16,6 +17,8 @@ type CfoAnalysis = {
     diagnosis: { secondaryDrivers: string[] };
     evidence: { items: Array<{ id: string; statement: string }> };
     recommendation: { immediate: { action: string } | null };
+    assumptions?: { items: string[] };
+    unknowns?: { items: string[] };
     nextQuestion: string | null;
     confidence: number;
   };
@@ -27,6 +30,8 @@ type FollowUpTurn = {
   analysis?: CfoAnalysis;
   error?: string;
 };
+
+const VERALIS_SESSION_KEY = "veralis-cfo-session-v2";
 
 const quickPrompts = [
   "Por que minha margem caiu?",
@@ -99,10 +104,10 @@ function HomeScreen({ onStart, onNewSchool, theme, onTheme }: { onStart: () => v
             </button>
             <p>Pergunta antes de presumir. Calcula antes de responder.</p>
           </div>
-          <input ref={schoolInputRef} className="visually-hidden" type="file" accept=".csv,.pdf" multiple onChange={selectSchoolFiles} />
+          <input ref={schoolInputRef} className="visually-hidden" type="file" accept=".csv,.pdf,.xlsx" multiple onChange={selectSchoolFiles} />
           <button className="new-school-entry" type="button" onClick={() => schoolInputRef.current?.click()}>
             <span aria-hidden="true">＋</span>
-            <span><small>NOVA ESCOLA</small><strong>Subir arquivos para avaliar</strong><em>Selecione CSV ou PDF · até 12 arquivos</em></span>
+            <span><small>NOVA ESCOLA</small><strong>Subir arquivos para avaliar</strong><em>Selecione XLSX, CSV ou PDF · até 12 arquivos</em></span>
             <b aria-hidden="true">↗</b>
           </button>
         </div>
@@ -296,6 +301,9 @@ function FollowUpExchange({ turn }: { turn: FollowUpTurn }) {
 }
 
 function UploadedDiagnosis({ analysis }: { analysis: CfoAnalysis }) {
+  const conclusions = analysis.response.evidence.items.map((item) => item.statement).filter((item, index, items) => items.indexOf(item) === index && item !== analysis.response.directAnswer).slice(0, 6);
+  const assumptions = analysis.response.assumptions?.items ?? [];
+  const unknowns = analysis.response.unknowns?.items ?? [];
   return (
     <article className="assistant-message assistant-message--follow-up" aria-label="Análise dos arquivos enviados">
       <div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>arquivos da sua escola</span></div></div>
@@ -303,6 +311,9 @@ function UploadedDiagnosis({ analysis }: { analysis: CfoAnalysis }) {
         <AnalysisOrigin analysis={analysis} />
         <p className="answer-lede">{analysis.response.directAnswer}</p>
         {analysis.response.diagnosis.secondaryDrivers.length > 0 ? <p className="answer-copy">{analysis.response.diagnosis.secondaryDrivers.slice(0, 3).join(" ")}</p> : null}
+        {conclusions.length > 0 ? <div className="follow-up-action"><span>Conclusões sustentadas</span>{conclusions.map((item) => <p key={item}>• {item}</p>)}</div> : null}
+        {assumptions.length > 0 ? <div className="follow-up-action"><span>Hipóteses e premissas</span>{assumptions.slice(0, 4).map((item) => <p key={item}>• {item}</p>)}</div> : null}
+        {unknowns.length > 0 ? <div className="follow-up-action"><span>Dados ainda necessários</span>{unknowns.slice(0, 4).map((item) => <p key={item}>• {item}</p>)}</div> : null}
         {analysis.response.recommendation.immediate?.action ? <div className="follow-up-action"><span>Próxima ação</span><p>{analysis.response.recommendation.immediate.action}</p></div> : null}
         {analysis.response.nextQuestion ? <div className="next-question"><span>Informação necessária</span><p>{analysis.response.nextQuestion}</p></div> : null}
       </div>
@@ -539,8 +550,16 @@ async function inspectLocalFile(file: File): Promise<LocalFileState> {
   const kind = extension === "csv" ? "CSV" : extension === "pdf" ? "PDF" : extension === "xlsx" ? "XLSX" : "FILE";
   if (file.size > 5 * 1024 * 1024) return { id, name: file.name, kind, status: "blocked", message: "Arquivo bloqueado: limite local de 5 MB." };
   if (extension === "pdf") return { id, name: file.name, kind, ...(await inspectPdf(file)) };
-  if (extension === "xlsx") return { id, name: file.name, kind, status: "blocked", message: "Converta o XLSX para CSV ou envie o PDF correspondente nesta versão." };
-  if (extension !== "csv") return { id, name: file.name, kind, status: "blocked", message: "Formato incompatível. Use CSV ou PDF." };
+  if (extension === "xlsx") {
+    try {
+      const sheets = readXlsxSheets(await file.arrayBuffer());
+      const document = parseUploadedXlsxRows(file.name, sheets);
+      return { id, name: file.name, kind, status: document.financialPeriods.length > 0 ? "ready" : "blocked", message: document.financialPeriods.length > 0 ? `XLSX lido: ${document.financialPeriods.length} períodos financeiros normalizados.` : "Não encontrei uma DRE reconhecível neste XLSX.", rows: document.financialPeriods.length, columns: sheets.length, document };
+    } catch {
+      return { id, name: file.name, kind, status: "blocked", message: "Não foi possível ler este XLSX. Verifique se o arquivo está íntegro e sem senha." };
+    }
+  }
+  if (extension !== "csv") return { id, name: file.name, kind, status: "blocked", message: "Formato incompatível. Use XLSX, CSV ou PDF." };
   const text = await file.text();
   const lines = text.split(/\r?\n/).filter(Boolean);
   const columns = (lines[0] ?? "").split(/[,;]/).map((value) => value.trim());
@@ -551,10 +570,14 @@ async function inspectLocalFile(file: File): Promise<LocalFileState> {
   return { id, name: file.name, kind, status: "ready", message: "CSV lido e normalizado localmente para o CFO desta sessão.", rows: lines.length - 1, columns: columns.length, document };
 }
 
-function FilesPanel({ initialFiles = [], onDocumentsReady, onDocumentRemoved, onAnalyze }: { initialFiles?: File[]; onDocumentsReady: (documents: UploadedSchoolDocument[]) => void; onDocumentRemoved: (name: string) => void; onAnalyze: () => void }) {
+function FilesPanel({ initialFiles = [], storedDocuments = [], onDocumentsReady, onDocumentRemoved, onAnalyze }: { initialFiles?: File[]; storedDocuments?: UploadedSchoolDocument[]; onDocumentsReady: (documents: UploadedSchoolDocument[]) => void; onDocumentRemoved: (name: string) => void; onAnalyze: () => void }) {
   const [fileStates, setFileStates] = useState<LocalFileState[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const initialKeyRef = useRef("");
+
+  useEffect(() => {
+    setFileStates((current) => storedDocuments.reduce<LocalFileState[]>((items, document) => items.some((item) => item.name === document.name) ? items : [...items, { id: `stored-${document.name}`, name: document.name, kind: document.name.toLowerCase().endsWith(".xlsx") ? "XLSX" : document.name.toLowerCase().endsWith(".pdf") ? "PDF" : "CSV", status: "ready", message: "Dados restaurados da memória desta aba.", rows: document.financialPeriods.length || undefined, document }], current));
+  }, [storedDocuments]);
 
   const inspectFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
@@ -588,13 +611,13 @@ function FilesPanel({ initialFiles = [], onDocumentsReady, onDocumentRemoved, on
 
   return (
     <section className="workspace-panel files-panel" aria-labelledby="files-title">
-      <div className="panel-intro"><div><span>DADOS LOCAIS</span><h2 id="files-title">Adicione os arquivos da escola.</h2><p>Selecione até 12 PDFs e CSVs de uma vez. Os arquivos aprovados alimentam o CFO somente nesta sessão.</p></div><a href="/private">Área privada →</a></div>
-      <input ref={inputRef} className="visually-hidden" type="file" accept=".csv,.pdf" multiple onChange={inspectFile} />
-      <button className="upload-zone" type="button" onClick={() => inputRef.current?.click()}><span>＋</span><strong>Selecionar vários arquivos da escola</strong><small>PDF e CSV · até 12 arquivos · máximo 5 MB por arquivo · leitura somente nesta sessão</small></button>
-      <div className="privacy-strip"><span>✓ múltiplos arquivos</span><span>✓ PDF com texto</span><span>✓ sem persistência</span><span>✓ dados identificáveis permitidos</span></div>
+      <div className="panel-intro"><div><span>DADOS LOCAIS</span><h2 id="files-title">Adicione os arquivos da escola.</h2><p>Selecione até 12 arquivos XLSX, PDF e CSV. Os indicadores normalizados ficam na memória desta aba durante a sessão.</p></div><a href="/private">Área privada →</a></div>
+      <input ref={inputRef} className="visually-hidden" type="file" accept=".csv,.pdf,.xlsx" multiple onChange={inspectFile} />
+      <button className="upload-zone" type="button" onClick={() => inputRef.current?.click()}><span>＋</span><strong>Selecionar vários arquivos da escola</strong><small>XLSX, PDF e CSV · até 12 arquivos · máximo 5 MB por arquivo</small></button>
+      <div className="privacy-strip"><span>✓ múltiplos arquivos</span><span>✓ XLSX e PDF com texto</span><span>✓ memória desta aba</span><span>✓ dados identificáveis permitidos</span></div>
       {fileStates.some((file) => file.document) ? <div className="new-school-ready"><strong>Arquivos conectados ao CFO</strong><span>A próxima resposta usará somente os dados normalizados da escola enviada.</span><button type="button" onClick={onAnalyze}>Ir para a conversa →</button></div> : null}
       {fileStates.map((fileState) => <article className={`file-result ${fileState.status}`} aria-live="polite" key={fileState.id}><div><span>{fileState.status === "ready" ? fileState.kind : "!"}</span><div><strong>{fileState.name}</strong><p>{fileState.message}</p>{fileState.rows ? <small>{fileState.rows} linhas · {fileState.columns} colunas · dados mapeados</small> : null}{fileState.pages ? <small>{fileState.pages} páginas · {fileState.characters?.toLocaleString("pt-BR")} caracteres extraídos</small> : null}{fileState.document?.warnings.map((warning) => <small key={warning}>Atenção: {warning}</small>)}</div></div><button type="button" onClick={() => { setFileStates((current) => current.filter((file) => file.id !== fileState.id)); onDocumentRemoved(fileState.name); }}>Remover</button></article>)}
-      <div className="file-flow"><div><b>1</b><span><strong>Ler</strong><small>PDF e CSV no navegador</small></span></div><div><b>2</b><span><strong>Validar</strong><small>tipo, tamanho e estrutura</small></span></div><div><b>3</b><span><strong>Normalizar</strong><small>mapear ou preservar UNKNOWN</small></span></div><div><b>4</b><span><strong>Reconciliar</strong><small>confirmar totais antes de responder</small></span></div></div>
+      <div className="file-flow"><div><b>1</b><span><strong>Ler</strong><small>XLSX, PDF e CSV no navegador</small></span></div><div><b>2</b><span><strong>Validar</strong><small>tipo, tamanho e estrutura</small></span></div><div><b>3</b><span><strong>Normalizar</strong><small>mapear ou preservar UNKNOWN</small></span></div><div><b>4</b><span><strong>Reconciliar</strong><small>confirmar totais antes de responder</small></span></div></div>
     </section>
   );
 }
@@ -637,11 +660,37 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
   const [analysisError, setAnalysisError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [completedTasks, setCompletedTasks] = useState<string[]>([]);
+  const [sessionHydrated, setSessionHydrated] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const nextTurnIdRef = useRef(1);
   const uploadedBusinessName = uploadedDocuments.find((document) => document.businessName)?.businessName ?? "Escola enviada";
   const hasUploadedSchool = uploadedDocuments.length > 0;
+
+  useEffect(() => {
+    try {
+      const saved = window.sessionStorage.getItem(VERALIS_SESSION_KEY);
+      if (saved) {
+        const snapshot = JSON.parse(saved) as { stage?: DemoStage; firstQuestion?: string; contextAnswer?: string; firstAnalysis?: CfoAnalysis | null; latestAnalysis?: CfoAnalysis | null; followUpTurns?: FollowUpTurn[]; uploadedDocuments?: UploadedSchoolDocument[] };
+        if (snapshot.stage) setStage(snapshot.stage);
+        if (typeof snapshot.firstQuestion === "string") setFirstQuestion(snapshot.firstQuestion);
+        if (typeof snapshot.contextAnswer === "string") setContextAnswer(snapshot.contextAnswer);
+        if (snapshot.firstAnalysis) setFirstAnalysis(snapshot.firstAnalysis);
+        if (snapshot.latestAnalysis) setLatestAnalysis(snapshot.latestAnalysis);
+        if (Array.isArray(snapshot.followUpTurns)) setFollowUpTurns(snapshot.followUpTurns);
+        if (Array.isArray(snapshot.uploadedDocuments)) setUploadedDocuments(snapshot.uploadedDocuments);
+      }
+    } catch {
+      window.sessionStorage.removeItem(VERALIS_SESSION_KEY);
+    } finally {
+      setSessionHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!sessionHydrated) return;
+    window.sessionStorage.setItem(VERALIS_SESSION_KEY, JSON.stringify({ stage, firstQuestion, contextAnswer, firstAnalysis, latestAnalysis, followUpTurns, uploadedDocuments }));
+  }, [sessionHydrated, stage, firstQuestion, contextAnswer, firstAnalysis, latestAnalysis, followUpTurns, uploadedDocuments]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -724,7 +773,7 @@ function DemoScreen({ theme, onTheme, onExit, initialView = "overview", initialF
           {activeView === "overview" ? <OverviewPanel completed={completedTasks} onToggle={toggleTask} onNavigate={setActiveView} /> : null}
           {activeView === "performance" ? <PerformancePanel /> : null}
           {activeView === "plan" ? <ActionPlanPanel /> : null}
-          {activeView === "files" ? <FilesPanel initialFiles={initialFiles} onDocumentsReady={mergeUploadedDocuments} onDocumentRemoved={removeUploadedDocument} onAnalyze={() => { resetDemo(); setInput("Analise os arquivos enviados e diga o que merece atenção primeiro."); setActiveView("chat"); requestAnimationFrame(() => inputRef.current?.focus()); }} /> : null}
+          {activeView === "files" ? <FilesPanel initialFiles={initialFiles} storedDocuments={uploadedDocuments} onDocumentsReady={mergeUploadedDocuments} onDocumentRemoved={removeUploadedDocument} onAnalyze={() => { resetDemo(); setInput("Faça uma análise executiva exaustiva dos arquivos: conclusões, tendências, riscos, hipóteses e dados ainda necessários."); setActiveView("chat"); requestAnimationFrame(() => inputRef.current?.focus()); }} /> : null}
           {activeView === "questions" ? <QuestionsPanel onUse={(question) => { setInput(question); setActiveView("chat"); requestAnimationFrame(() => inputRef.current?.focus()); }} /> : null}
           {activeView === "chat" ? <section className="conversation" aria-label="Conversa com a Veralis"><div className="conversation-inner"><div className="date-divider"><span>Hoje</span></div><article className="assistant-message assistant-message--welcome"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>agora</span></div></div><div className="message-content"><p className="answer-lede">{hasUploadedSchool ? `Carreguei ${uploadedDocuments.length} arquivo${uploadedDocuments.length === 1 ? "" : "s"} de ${uploadedBusinessName}.` : "Carreguei os dados sintéticos da Escola Horizonte."}</p><p className="answer-copy">{hasUploadedSchool ? "As respostas desta conversa usarão somente os indicadores normalizados desses arquivos." : "Pergunte sobre a demo ou envie seus arquivos em Arquivos para avaliar outra escola."}</p></div></article>{stage === "ready" ? <div className="quick-prompts" aria-label="Perguntas sugeridas">{quickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => processMessage(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div> : null}{firstQuestion ? <article className="user-message"><span>Você</span><p>{firstQuestion}</p></article> : null}{firstAnalysis ? (hasUploadedSchool ? <UploadedDiagnosis analysis={firstAnalysis} /> : <InitialDiagnosis analysis={firstAnalysis} />) : null}{contextAnswer ? <article className="user-message"><span>Você</span><p>{contextAnswer}</p></article> : null}{latestAnalysis ? (hasUploadedSchool ? <UploadedDiagnosis analysis={latestAnalysis} /> : <RevisedDiagnosis analysis={latestAnalysis} />) : null}{followUpTurns.map((turn) => <FollowUpExchange key={turn.id} turn={turn} />)}{analysisError ? <article className="assistant-message"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>ação necessária</span></div></div><div className="message-content"><p className="answer-copy">{analysisError}</p></div></article> : null}{isThinking ? <div className="thinking" role="status" aria-live="polite"><span className="assistant-avatar" aria-hidden="true">V</span><div><i /><i /><i /></div><p>{hasUploadedSchool ? "OpenAI analisando os arquivos da sua escola" : stage === "ready" ? "OpenAI analisando os indicadores" : "Atualizando o diagnóstico"}</p></div> : null}<div ref={endRef} /></div></section> : null}
         </div>

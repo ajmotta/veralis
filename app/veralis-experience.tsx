@@ -425,25 +425,74 @@ function ActionPlanPanel() {
   );
 }
 
-type LocalFileState = { name: string; status: "checking" | "ready" | "blocked"; message: string; rows?: number; columns?: number };
+type LocalFileState = {
+  id: string;
+  name: string;
+  kind: "CSV" | "PDF" | "XLSX" | "FILE";
+  status: "checking" | "ready" | "blocked";
+  message: string;
+  rows?: number;
+  columns?: number;
+  pages?: number;
+  characters?: number;
+};
+
+function localFileId(file: File): string {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+async function inspectPdf(file: File): Promise<Pick<LocalFileState, "status" | "message" | "pages" | "characters">> {
+  try {
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/legacy/build/pdf.worker.mjs",
+      import.meta.url,
+    ).toString();
+    const document = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    if (document.numPages > 80) {
+      await document.destroy();
+      return { status: "blocked", message: "PDF acima do limite de 80 páginas desta demonstração." };
+    }
+    let characters = 0;
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      characters += content.items.reduce((total, item) => {
+        return total + ("str" in item ? item.str.length : 0);
+      }, 0);
+      page.cleanup();
+    }
+    const pages = document.numPages;
+    await document.destroy();
+    if (characters === 0) {
+      return { status: "blocked", message: "PDF sem texto selecionável. Documentos digitalizados ainda exigem OCR.", pages, characters };
+    }
+    return {
+      status: "ready",
+      message: "PDF lido localmente. O conteúdo permanece somente nesta sessão.",
+      pages,
+      characters,
+    };
+  } catch {
+    return { status: "blocked", message: "Não foi possível ler este PDF. Verifique se o arquivo está íntegro e sem senha." };
+  }
+}
 
 async function inspectLocalFile(file: File): Promise<LocalFileState> {
-  if (file.size > 5 * 1024 * 1024) return { name: file.name, status: "blocked", message: "Arquivo bloqueado: limite local de 5 MB." };
+  const id = localFileId(file);
   const extension = file.name.split(".").pop()?.toLowerCase();
-  if (extension === "pdf") return { name: file.name, status: "blocked", message: "PDF recebido, mas a leitura financeira ainda não está ativa nesta demonstração pública." };
-  if (extension === "xlsx") return { name: file.name, status: "blocked", message: "XLSX recebido, mas o processamento seguro ainda depende da área privada." };
-  if (extension !== "csv") return { name: file.name, status: "blocked", message: "Formato incompatível. Use CSV, XLSX ou PDF." };
+  const kind = extension === "csv" ? "CSV" : extension === "pdf" ? "PDF" : extension === "xlsx" ? "XLSX" : "FILE";
+  if (file.size > 5 * 1024 * 1024) return { id, name: file.name, kind, status: "blocked", message: "Arquivo bloqueado: limite local de 5 MB." };
+  if (extension === "pdf") return { id, name: file.name, kind, ...(await inspectPdf(file)) };
+  if (extension === "xlsx") return { id, name: file.name, kind, status: "blocked", message: "XLSX recebido, mas a leitura ainda não está ativa nesta demonstração." };
+  if (extension !== "csv") return { id, name: file.name, kind, status: "blocked", message: "Formato incompatível. Use CSV, XLSX ou PDF." };
   const text = await file.text();
   const lines = text.split(/\r?\n/).filter(Boolean);
-  const columns = (lines[0] ?? "").split(/[,;]/).map((value) => value.trim().toLowerCase());
+  const columns = (lines[0] ?? "").split(/[,;]/).map((value) => value.trim());
   if (lines.length < 2 || lines.length > 2_000 || columns.length < 2 || columns.length > 40) {
-    return { name: file.name, status: "blocked", message: "Estrutura incompatível: use entre 2 e 2.000 linhas e 2 a 40 colunas." };
+    return { id, name: file.name, kind, status: "blocked", message: "Estrutura incompatível: use entre 2 e 2.000 linhas e 2 a 40 colunas." };
   }
-  const piiHeader = columns.some((column) => /^(nome|cpf|e-?mail|telefone|celular|data[_ ]?de[_ ]?nascimento|nome[_ ]?do[_ ]?aluno|crianca)$/.test(column));
-  const sample = lines.slice(0, 30).join("\n");
-  const piiContent = /[\w.+-]+@[\w.-]+\.[a-z]{2,}|\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/i.test(sample);
-  if (piiHeader || piiContent) return { name: file.name, status: "blocked", message: "Possível dado pessoal detectado. Remova nomes, CPF, email, telefone e dados de crianças antes de continuar." };
-  return { name: file.name, status: "ready", message: "CSV validado localmente. O arquivo não foi enviado nem persistido.", rows: lines.length - 1, columns: columns.length };
+  return { id, name: file.name, kind, status: "ready", message: "CSV validado localmente. Dados identificáveis são permitidos nesta sessão.", rows: lines.length - 1, columns: columns.length };
 }
 
 function FilesPanel({ initialFiles = [] }: { initialFiles?: File[] }) {
@@ -453,8 +502,18 @@ function FilesPanel({ initialFiles = [] }: { initialFiles?: File[] }) {
 
   const inspectFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
-    setFileStates(files.map((file) => ({ name: file.name, status: "checking", message: "Validando extensão, tamanho e possíveis dados pessoais…" })));
-    setFileStates(await Promise.all(files.map(inspectLocalFile)));
+    const acceptedFiles = files.slice(0, 12);
+    const ids = new Set(acceptedFiles.map(localFileId));
+    const pending: LocalFileState[] = acceptedFiles.map((file) => ({
+      id: localFileId(file),
+      name: file.name,
+      kind: file.name.toLowerCase().endsWith(".pdf") ? "PDF" : file.name.toLowerCase().endsWith(".csv") ? "CSV" : file.name.toLowerCase().endsWith(".xlsx") ? "XLSX" : "FILE",
+      status: "checking",
+      message: "Lendo o arquivo localmente…",
+    }));
+    setFileStates((current) => [...current.filter((item) => !ids.has(item.id)), ...pending]);
+    const inspected = await Promise.all(acceptedFiles.map(inspectLocalFile));
+    setFileStates((current) => [...current.filter((item) => !ids.has(item.id)), ...inspected]);
   }, []);
 
   useEffect(() => {
@@ -472,13 +531,13 @@ function FilesPanel({ initialFiles = [] }: { initialFiles?: File[] }) {
 
   return (
     <section className="workspace-panel files-panel" aria-labelledby="files-title">
-      <div className="panel-intro"><div><span>DADOS LOCAIS</span><h2 id="files-title">Traga números, não identidades.</h2><p>A demonstração valida CSV no seu navegador e bloqueia sinais de dados pessoais antes de qualquer análise.</p></div><a href="/private">Área privada →</a></div>
+      <div className="panel-intro"><div><span>DADOS LOCAIS</span><h2 id="files-title">Adicione os arquivos da escola.</h2><p>Selecione até 12 PDFs e CSVs de uma vez. Dados identificáveis são permitidos, desde que você tenha autorização para utilizá-los.</p></div><a href="/private">Área privada →</a></div>
       <input ref={inputRef} className="visually-hidden" type="file" accept=".csv,.xlsx,.pdf" multiple onChange={inspectFile} />
-      <button className="upload-zone" type="button" onClick={() => inputRef.current?.click()}><span>＋</span><strong>Selecionar arquivos da escola</strong><small>CSV: validação local · XLSX/PDF: recebidos com limitação explícita · máximo 5 MB cada</small></button>
-      <div className="privacy-strip"><span>✓ sem persistência</span><span>✓ sem macros</span><span>✓ bloqueio de PII</span><span>✓ UNKNOWN preservado</span></div>
-      {fileStates.some((file) => file.status === "ready") ? <div className="new-school-ready"><strong>Nova escola iniciada</strong><span>Os CSVs aprovados estão prontos para a próxima etapa de normalização. Eles ainda não alimentam o CFO.</span></div> : null}
-      {fileStates.map((fileState) => <article className={`file-result ${fileState.status}`} aria-live="polite" key={fileState.name}><div><span>{fileState.status === "ready" ? "CSV" : "!"}</span><div><strong>{fileState.name}</strong><p>{fileState.message}</p>{fileState.rows ? <small>{fileState.rows} linhas · {fileState.columns} colunas · pronto para normalização</small> : null}</div></div><button type="button" onClick={() => setFileStates((current) => current.filter((file) => file.name !== fileState.name))}>Remover</button></article>)}
-      <div className="file-flow"><div><b>1</b><span><strong>Validar</strong><small>tipo, tamanho e estrutura</small></span></div><div><b>2</b><span><strong>Proteger</strong><small>detectar dados pessoais</small></span></div><div><b>3</b><span><strong>Normalizar</strong><small>mapear ou preservar UNKNOWN</small></span></div><div><b>4</b><span><strong>Reconciliar</strong><small>confirmar totais antes de responder</small></span></div></div>
+      <button className="upload-zone" type="button" onClick={() => inputRef.current?.click()}><span>＋</span><strong>Selecionar vários arquivos da escola</strong><small>PDF e CSV · até 12 arquivos · máximo 5 MB por arquivo · leitura somente nesta sessão</small></button>
+      <div className="privacy-strip"><span>✓ múltiplos arquivos</span><span>✓ PDF com texto</span><span>✓ sem persistência</span><span>✓ dados identificáveis permitidos</span></div>
+      {fileStates.some((file) => file.status === "ready") ? <div className="new-school-ready"><strong>Arquivos lidos nesta sessão</strong><span>PDFs e CSVs aprovados estão prontos para normalização. Eles ainda não alimentam automaticamente o CFO.</span></div> : null}
+      {fileStates.map((fileState) => <article className={`file-result ${fileState.status}`} aria-live="polite" key={fileState.id}><div><span>{fileState.status === "ready" ? fileState.kind : "!"}</span><div><strong>{fileState.name}</strong><p>{fileState.message}</p>{fileState.rows ? <small>{fileState.rows} linhas · {fileState.columns} colunas · pronto para normalização</small> : null}{fileState.pages ? <small>{fileState.pages} páginas · {fileState.characters?.toLocaleString("pt-BR")} caracteres extraídos</small> : null}</div></div><button type="button" onClick={() => setFileStates((current) => current.filter((file) => file.id !== fileState.id))}>Remover</button></article>)}
+      <div className="file-flow"><div><b>1</b><span><strong>Ler</strong><small>PDF e CSV no navegador</small></span></div><div><b>2</b><span><strong>Validar</strong><small>tipo, tamanho e estrutura</small></span></div><div><b>3</b><span><strong>Normalizar</strong><small>mapear ou preservar UNKNOWN</small></span></div><div><b>4</b><span><strong>Reconciliar</strong><small>confirmar totais antes de responder</small></span></div></div>
     </section>
   );
 }

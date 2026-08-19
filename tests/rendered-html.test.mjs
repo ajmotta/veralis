@@ -71,8 +71,9 @@ test("keeps the public demo synthetic, accessible, and resettable", async () => 
   assert.match(experience, /Plano de ação/);
   assert.match(experience, /Benchmark experimental baseado em escolas sintéticas comparáveis/);
   assert.match(experience, /Subir arquivos para avaliar/);
-  assert.match(experience, /Selecionar arquivos da escola/);
-  assert.match(experience, /Eles ainda não alimentam o CFO/);
+  assert.match(experience, /Selecionar vários arquivos da escola/);
+  assert.match(experience, /dados identificáveis permitidos/);
+  assert.match(experience, /Eles ainda não alimentam automaticamente o CFO/);
   assert.match(experience, /Nada é salvo em servidor/);
   assert.match(experience, /Áudio ainda não disponível/);
   assert.match(experience, /fetch\("\/api\/analyze"/);

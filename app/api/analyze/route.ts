@@ -1,5 +1,5 @@
 import { analyzeCase } from "../../../src/ai/responses-client";
-import { isCfoQuestionInScope } from "../../../src/ai/scope";
+import { isCfoConversationInScope } from "../../../src/ai/scope";
 import type { CaseState } from "../../../src/domain/schemas/case-state";
 
 const MAX_BODY_BYTES = 64_000;
@@ -97,10 +97,13 @@ export async function POST(request: Request): Promise<Response> {
     return json({ error: "CASE_LIMIT_EXCEEDED", message: "Reduza períodos, fontes ou evidências antes de continuar." }, 413);
   }
 
-  if (!isCfoQuestionInScope(caseState.objective.currentQuestion)) {
+  const previousQuestions = caseState.sources.userStatements
+    .map((statement) => statement.text)
+    .filter((text) => text !== caseState.objective.currentQuestion);
+  if (!isCfoConversationInScope(caseState.objective.currentQuestion, previousQuestions)) {
     return json({
       error: "OUT_OF_SCOPE",
-      message: "Posso responder sobre finanças, operação, turmas, equipe e crescimento da escola. Reformule sua pergunta dentro desse escopo.",
+      message: "Seja específico sobre finanças, operação, turmas, equipe ou crescimento da escola. Posso aprofundar respostas anteriores dentro desse contexto.",
     }, 422);
   }
 

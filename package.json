@@ -10,7 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs && npm run test:unit && npm run test:integration",
-    "test:integration": "tsx --test tests/integration/ai-engine.test.ts",
+    "test:integration": "node --import ./scripts/tsx-windows-workaround.mjs --import tsx --test tests/integration/ai-engine.test.ts",
     "test:unit": "node --experimental-strip-types --test tests/unit/*.test.ts",
     "fixture:generate": "node --experimental-strip-types scripts/generate-demo-fixture.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",

@@ -4,6 +4,15 @@ import test from "node:test";
 
 const projectRoot = new URL("../", import.meta.url);
 
+async function readOptionalDirectory(url) {
+  try {
+    return await readdir(url);
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 async function render(path = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
@@ -64,7 +73,9 @@ test("keeps the public demo synthetic, accessible, and resettable", async () => 
   assert.match(experience, /Selecionar CSV ou XLSX/);
   assert.match(experience, /Nada é salvo em servidor/);
   assert.match(experience, /Áudio ainda não disponível/);
-  assert.match(experience, /Você abriu alguma nova turma ou aumentou o quadro nesse período\?/);
+  assert.match(experience, /fetch\("\/api\/analyze"/);
+  assert.match(experience, /OpenAI · resposta verificada/);
+  assert.match(experience, /fallback seguro/);
   assert.match(experience, /Novo contexto aplicado ao diagnóstico/);
   assert.match(experience, /Bridge reconciliada/);
   assert.match(experience, /Ver cálculo/);
@@ -97,5 +108,5 @@ test("removes the disposable starter experience", async () => {
   assert.doesNotMatch(page, /SkeletonPreview|codex-preview/);
   assert.doesNotMatch(layout, /Starter Project|_sites-preview|codex-preview/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
-  assert.deepEqual(await readdir(new URL("app/_sites-preview", projectRoot)), []);
+  assert.deepEqual(await readOptionalDirectory(new URL("app/_sites-preview", projectRoot)), []);
 });

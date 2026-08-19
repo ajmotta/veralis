@@ -7,6 +7,7 @@ import type { StructuredResponse } from "./schemas/response";
 
 const RESPONSES_API_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_MODEL = "gpt-5.4-mini";
 
 export type AnalysisMode = OfflineAnalysisResult["mode"] | "OPENAI" | "DETERMINISTIC_FALLBACK";
 
@@ -104,8 +105,8 @@ export async function analyzeCase(
   options: ResponsesClientOptions = {},
 ): Promise<AnalysisResult> {
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
-  const model = options.model ?? process.env.OPENAI_MODEL;
-  if (!apiKey || !model) {
+  const model = options.model ?? process.env.OPENAI_MODEL ?? DEFAULT_MODEL;
+  if (!apiKey) {
     return deterministicFallback(caseState, "AI_NOT_CONFIGURED");
   }
 

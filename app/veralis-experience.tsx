@@ -1,10 +1,24 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { buildPublicCfoCaseState } from "../src/demo/public-cfo-case";
 
 type Theme = "dark" | "light";
 type DemoStage = "ready" | "question" | "revised";
 type WorkspaceView = "chat" | "overview" | "performance" | "plan" | "files" | "questions";
+
+type CfoAnalysis = {
+  mode: "OPENAI" | "DETERMINISTIC_DEMO" | "DETERMINISTIC_FALLBACK" | "SAFE_FALLBACK";
+  fallbackReason?: string;
+  response: {
+    directAnswer: string;
+    diagnosis: { secondaryDrivers: string[] };
+    evidence: { items: Array<{ id: string; statement: string }> };
+    recommendation: { immediate: { action: string } | null };
+    nextQuestion: string | null;
+    confidence: number;
+  };
+};
 
 const quickPrompts = [
   "Por que minha margem caiu?",
@@ -97,7 +111,12 @@ function HomeScreen({ onStart, theme, onTheme }: { onStart: () => void; theme: T
   );
 }
 
-function InitialDiagnosis() {
+function AnalysisOrigin({ analysis }: { analysis: CfoAnalysis }) {
+  const openAI = analysis.mode === "OPENAI";
+  return <div className={`analysis-origin${openAI ? " is-openai" : " is-fallback"}`}><i />{openAI ? "OpenAI · resposta verificada" : "Motor verificável · fallback seguro"}</div>;
+}
+
+function InitialDiagnosis({ analysis }: { analysis: CfoAnalysis }) {
   return (
     <article className="assistant-message" aria-label="Diagnóstico inicial da Veralis">
       <div className="message-heading">
@@ -105,8 +124,9 @@ function InitialDiagnosis() {
         <div><strong>Veralis</strong><span>agora</span></div>
       </div>
       <div className="message-content">
-        <p className="answer-lede">O crescimento de alunos não se converteu na mesma proporção em resultado.</p>
-        <p className="answer-copy">Até aqui, os dados mostram três movimentos confiáveis:</p>
+        <AnalysisOrigin analysis={analysis} />
+        <p className="answer-lede">{analysis.response.directAnswer}</p>
+        <p className="answer-copy">{analysis.response.diagnosis.secondaryDrivers.slice(0, 2).join(" ") || "A resposta usa somente dados sintéticos reconciliados da Escola Horizonte."}</p>
         <div className="metric-grid">
           {evidenceItems.map((item) => (
             <div className="metric-card" key={item.label}>
@@ -121,10 +141,10 @@ function InitialDiagnosis() {
           <span className="unknown-icon" aria-hidden="true">!</span>
           <div><strong>Falta um contexto operacional</strong><p>Os arquivos mostram o aumento de pessoal e turmas, mas não explicam a decisão.</p></div>
         </div>
-        <div className="next-question">
+        {analysis.response.nextQuestion ? <div className="next-question">
           <span>Uma pergunta para fechar o diagnóstico</span>
-          <p>Você abriu alguma nova turma ou aumentou o quadro nesse período?</p>
-        </div>
+          <p>{analysis.response.nextQuestion}</p>
+        </div> : null}
       </div>
     </article>
   );
@@ -164,7 +184,7 @@ function DetailPanel({ panel }: { panel: "calculation" | "evidence" | "simulatio
   );
 }
 
-function RevisedDiagnosis() {
+function RevisedDiagnosis({ analysis }: { analysis: CfoAnalysis }) {
   const [openPanel, setOpenPanel] = useState<"calculation" | "evidence" | "simulation" | null>(null);
   const togglePanel = (panel: "calculation" | "evidence" | "simulation") => {
     setOpenPanel((current) => current === panel ? null : panel);
@@ -178,9 +198,10 @@ function RevisedDiagnosis() {
         <div><strong>Veralis</strong><span>diagnóstico atualizado</span></div>
       </div>
       <div className="message-content">
+        <AnalysisOrigin analysis={analysis} />
         <div className="update-label"><i /> Novo contexto aplicado ao diagnóstico</div>
-        <p className="answer-lede">O crescimento não foi o problema isoladamente.</p>
-        <p className="answer-copy">A margem caiu pela combinação de <strong>menor receita líquida por aluno</strong>, <strong>aumento de pessoal</strong> e <strong>baixa ocupação da nova turma</strong>.</p>
+        <p className="answer-lede">{analysis.response.directAnswer}</p>
+        <p className="answer-copy">{analysis.response.diagnosis.secondaryDrivers.slice(0, 2).join(" ") || "O diagnóstico continua limitado aos números reconciliados desta demonstração."}</p>
 
         <section className="evidence-highlight" aria-label="Evidência principal">
           <div className="evidence-label"><span>FOLHA / RECEITA</span><small>evidência principal</small></div>
@@ -476,6 +497,9 @@ function DemoScreen({ theme, onTheme, onExit }: { theme: Theme; onTheme: () => v
   const [firstQuestion, setFirstQuestion] = useState("");
   const [contextAnswer, setContextAnswer] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+  const [firstAnalysis, setFirstAnalysis] = useState<CfoAnalysis | null>(null);
+  const [latestAnalysis, setLatestAnalysis] = useState<CfoAnalysis | null>(null);
+  const [analysisError, setAnalysisError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [completedTasks, setCompletedTasks] = useState<string[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
@@ -487,16 +511,35 @@ function DemoScreen({ theme, onTheme, onExit }: { theme: Theme; onTheme: () => v
 
   const resetDemo = () => {
     setStage("ready"); setInput(""); setFirstQuestion(""); setContextAnswer(""); setIsThinking(false);
+    setFirstAnalysis(null); setLatestAnalysis(null); setAnalysisError("");
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
-  const processMessage = (message: string) => {
+  const processMessage = async (message: string) => {
     const cleanMessage = message.trim();
     if (!cleanMessage || isThinking) return;
     setActiveView("chat"); setInput("");
     if (stage === "ready") setFirstQuestion(cleanMessage); else setContextAnswer(cleanMessage);
-    setIsThinking(true);
-    window.setTimeout(() => { setStage(stage === "ready" ? "question" : "revised"); setIsThinking(false); }, 620);
+    setAnalysisError(""); setIsThinking(true);
+    try {
+      const previous = [firstQuestion, contextAnswer].filter(Boolean);
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ caseState: buildPublicCfoCaseState(cleanMessage, previous) }),
+      });
+      const payload = await response.json() as CfoAnalysis | { message?: string };
+      if (!response.ok || !("mode" in payload)) {
+        throw new Error(("message" in payload && payload.message) || "Não foi possível concluir a análise agora.");
+      }
+      if (stage === "ready") setFirstAnalysis(payload); else setLatestAnalysis(payload);
+      setStage(stage === "ready" ? "question" : "revised");
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : "Não foi possível concluir a análise agora.");
+    } finally {
+      setIsThinking(false);
+    }
   };
 
   const submit = (event: FormEvent) => { event.preventDefault(); processMessage(input); };
@@ -519,7 +562,7 @@ function DemoScreen({ theme, onTheme, onExit }: { theme: Theme; onTheme: () => v
           {activeView === "plan" ? <ActionPlanPanel /> : null}
           {activeView === "files" ? <FilesPanel /> : null}
           {activeView === "questions" ? <QuestionsPanel onUse={(question) => { setInput(question); setActiveView("chat"); requestAnimationFrame(() => inputRef.current?.focus()); }} /> : null}
-          {activeView === "chat" ? <section className="conversation" aria-label="Conversa com a Veralis"><div className="conversation-inner"><div className="date-divider"><span>Hoje</span></div><article className="assistant-message assistant-message--welcome"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>agora</span></div></div><div className="message-content"><p className="answer-lede">Carreguei os dados sintéticos da Escola Horizonte.</p><p className="answer-copy">O que você quer entender?</p></div></article>{stage === "ready" ? <div className="quick-prompts" aria-label="Perguntas sugeridas">{quickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => processMessage(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div> : null}{firstQuestion ? <article className="user-message"><span>Você</span><p>{firstQuestion}</p></article> : null}{stage === "question" || stage === "revised" ? <InitialDiagnosis /> : null}{contextAnswer ? <article className="user-message"><span>Você</span><p>{contextAnswer}</p></article> : null}{stage === "revised" ? <RevisedDiagnosis /> : null}{isThinking ? <div className="thinking" role="status" aria-live="polite"><span className="assistant-avatar" aria-hidden="true">V</span><div><i /><i /><i /></div><p>{stage === "ready" ? "Calculando indicadores" : "Atualizando o diagnóstico"}</p></div> : null}<div ref={endRef} /></div></section> : null}
+          {activeView === "chat" ? <section className="conversation" aria-label="Conversa com a Veralis"><div className="conversation-inner"><div className="date-divider"><span>Hoje</span></div><article className="assistant-message assistant-message--welcome"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>agora</span></div></div><div className="message-content"><p className="answer-lede">Carreguei os dados sintéticos da Escola Horizonte.</p><p className="answer-copy">Pergunte ao seu CFO. A origem da resposta aparecerá em cada análise.</p></div></article>{stage === "ready" ? <div className="quick-prompts" aria-label="Perguntas sugeridas">{quickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => processMessage(prompt)}>{prompt}<span aria-hidden="true">↗</span></button>)}</div> : null}{firstQuestion ? <article className="user-message"><span>Você</span><p>{firstQuestion}</p></article> : null}{firstAnalysis ? <InitialDiagnosis analysis={firstAnalysis} /> : null}{contextAnswer ? <article className="user-message"><span>Você</span><p>{contextAnswer}</p></article> : null}{latestAnalysis ? <RevisedDiagnosis analysis={latestAnalysis} /> : null}{analysisError ? <article className="assistant-message"><div className="message-heading"><span className="assistant-avatar" aria-hidden="true">V</span><div><strong>Veralis</strong><span>não enviado</span></div></div><div className="message-content"><p className="answer-copy">{analysisError}</p></div></article> : null}{isThinking ? <div className="thinking" role="status" aria-live="polite"><span className="assistant-avatar" aria-hidden="true">V</span><div><i /><i /><i /></div><p>{stage === "ready" ? "OpenAI analisando os indicadores" : "Atualizando o diagnóstico"}</p></div> : null}<div ref={endRef} /></div></section> : null}
         </div>
 
         <div className="composer-wrap launch-composer"><form className="composer" onSubmit={submit}><button className="attach-button" type="button" onClick={() => setActiveView("files")} aria-label="Abrir entrada de arquivos" title="Arquivos">＋</button><textarea ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={onKeyDown} rows={1} aria-label="Mensagem para a Veralis" placeholder={stage === "question" ? "Conte o que mudou na operação..." : "Pergunte à Veralis..."} /><button className="voice-button" type="button" aria-label="Áudio ainda não disponível" title="Áudio entra na próxima etapa">●</button><button className="send-button" type="submit" disabled={!input.trim() || isThinking} aria-label="Enviar mensagem">↑</button></form><p>Enter para enviar · Shift + Enter para nova linha · voz em preparação</p></div>

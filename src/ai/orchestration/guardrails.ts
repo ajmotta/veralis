@@ -38,7 +38,10 @@ export function canonicalReasoningPayload(caseState: CaseState) {
     version: caseState.version,
     business: caseState.business,
     user: caseState.user,
-    objective: caseState.objective,
+    objective: {
+      currentQuestion: wrapUntrustedData(caseState.objective.currentQuestion, "USER_STATEMENT"),
+      decisionUnderAnalysis: caseState.objective.decisionUnderAnalysis,
+    },
     sourceMetadata: {
       files: caseState.sources.files,
       conflicts: caseState.sources.conflicts,
